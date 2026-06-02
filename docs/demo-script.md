@@ -15,7 +15,7 @@ Use:
 - `demo@slidestudio.local`
 - `demo1234`
 
-Point out that this is not a throwaway demo: the user has a project history, saved model settings, and seeded sample decks.
+Point out that this is not a throwaway demo: the user has a project history, server-managed AI generation, and seeded sample decks.
 
 ## 0:45-1:20 - Open a Project
 

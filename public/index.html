@@ -10,21 +10,40 @@
     <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-    <aside class="rail">
-        <div class="rail-logo">S</div>
-        <button class="rail-button active" type="button" title="Home" aria-label="Home" data-rail-action="home">
-            <span>⌂</span>
-        </button>
-        <button class="rail-button" type="button" title="Templates" aria-label="Templates" data-rail-action="templates">
-            <span>▦</span>
-        </button>
-        <button class="rail-button" type="button" title="History" aria-label="History" data-rail-action="history">
-            <span>◷</span>
-        </button>
-        <button class="rail-button" type="button" title="Settings" aria-label="Settings" data-rail-action="settings">
-            <span>⚙</span>
-        </button>
-        <button class="rail-user" id="userButton" type="button" title="Account">?</button>
+    <button class="sidebar-toggle" id="sidebarToggle" type="button" title="Sidebar" aria-label="Toggle sidebar" aria-expanded="false">
+        <span></span>
+        <span></span>
+    </button>
+
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+        <div class="sidebar-top">
+            <button class="sidebar-action active" type="button" data-rail-action="home">
+                <span class="sidebar-icon">✎</span>
+                <span>New chat</span>
+            </button>
+        </div>
+
+        <section class="sidebar-projects">
+            <div class="sidebar-section-head">
+                <span>Projects</span>
+                <button class="sidebar-mini" id="refreshHomeDecksBtn" type="button" title="Refresh projects">↻</button>
+            </div>
+            <div class="sidebar-project-list" id="sidebarDeckList"></div>
+        </section>
+
+        <div class="sidebar-bottom">
+            <button class="sidebar-account" id="userButton" type="button">
+                <span class="sidebar-avatar" id="sidebarAvatar">?</span>
+                <span>
+                    <strong id="sidebarAccountName">Guest trial</strong>
+                    <small id="sidebarAccountEmail">Local workspace</small>
+                </span>
+            </button>
+            <button class="sidebar-action settings-action" type="button" id="settingsButton">
+                <span class="sidebar-icon">⚙</span>
+                <span>Settings</span>
+            </button>
+        </div>
     </aside>
 
     <main class="app">
@@ -39,8 +58,8 @@
         <section class="auth-view" id="authView">
             <div class="auth-panel">
                 <div class="auth-brand">Slide Studio</div>
-                <h1>登录后开始制作网页 slides</h1>
-                <p>本地账号用于保存模型配置、生成记录和标注修改。</p>
+                <h1>注册后验证邮箱解锁正式额度</h1>
+                <p>也可以先免登录试用基础模板，账号用于保存生成记录、导出和后续购买额度。</p>
                 <div class="demo-credentials">
                     <strong>Demo account</strong>
                     <span>demo@slidestudio.local / demo1234</span>
@@ -54,6 +73,7 @@
                         <button type="button" id="signupBtn">Create account</button>
                     </div>
                     <div class="form-error" id="authError"></div>
+                    <div class="verification-link hidden" id="verificationLink"></div>
                 </form>
             </div>
         </section>
@@ -93,48 +113,20 @@
                             <button class="mode-chip" type="button">PowerPoint</button>
                             <button class="mode-chip" type="button">Frontend (HTML)</button>
                         </div>
-                        <div class="composer-actions">
-                            <button class="icon-btn" id="modelBtn" type="button" title="Model settings">⚙</button>
-                        </div>
                     </div>
                     <div class="selected-template" id="selectedTemplate">
                         <span>No template selected</span>
                     </div>
+                    <div class="quota-status" id="quotaStatus"></div>
                     <div class="generation-status hidden" id="generationStatus">
                         <span class="status-spinner"></span>
                         <div>
                             <strong id="generationStatusTitle">Generating slides</strong>
-                            <span id="generationStatusDetail">Reading template rules and calling your AI provider.</span>
+                            <span id="generationStatusDetail">Reading template rules and generating your deck.</span>
                         </div>
                         <button class="retry-btn hidden" id="retryGenerateBtn" type="button">Retry</button>
                     </div>
                 </section>
-            </section>
-
-            <section class="quick-actions">
-                <button class="quick-card" type="button" data-fill="Create a 10-page product launch deck about an AI creation tool.">
-                    <strong>Create</strong>
-                    <span>Start from a prompt and selected template.</span>
-                </button>
-                <button class="quick-card" type="button" data-fill="Improve my existing deck with stronger layout, visuals, and storytelling.">
-                    <strong>Improve</strong>
-                    <span>Upload slides to enhance structure and craft.</span>
-                </button>
-                <button class="quick-card" type="button" data-fill="Convert this document into a structured HTML slide deck.">
-                    <strong>Convert</strong>
-                    <span>Turn files into frontend slide decks.</span>
-                </button>
-            </section>
-
-            <section class="recent-section">
-                <div class="section-head compact">
-                    <div>
-                        <h2>Recent projects</h2>
-                        <p>Open a generated deck and continue editing.</p>
-                    </div>
-                    <button class="template-action" type="button" id="refreshHomeDecksBtn">Refresh</button>
-                </div>
-                <div class="home-deck-list" id="homeDeckList"></div>
             </section>
 
             <section class="templates-section">
@@ -159,17 +151,54 @@
             </section>
         </section>
 
-        <section class="workspace hidden" id="workspaceView">
-            <aside class="project-pane">
-                <div class="project-pane-head">
-                    <strong>Projects</strong>
-                    <button id="refreshDecksBtn" type="button" title="Refresh history">↻</button>
+        <section class="delivery-view hidden" id="deliveryView">
+            <header class="delivery-topline">
+                <button id="deliveryBackBtn" type="button">← Home</button>
+                <div>
+                    <strong>Slide Studio</strong>
+                    <span id="deliveryDeckName">Generating deck</span>
                 </div>
-                <div class="deck-list" id="deckList"></div>
-            </aside>
+            </header>
+
+            <section class="delivery-shell">
+                <section class="delivery-chat">
+                    <header class="delivery-task-head">
+                        <h1 id="deliveryPrompt">Create a slide deck.</h1>
+                        <span id="deliveryStatusPill">Generating</span>
+                    </header>
+
+                    <div class="working-card" id="workingCard">
+                        <div class="working-card-head">
+                            <span id="workingSummary">Working</span>
+                            <small id="workingElapsed">0s</small>
+                        </div>
+                        <div class="working-steps" id="workingSteps"></div>
+                    </div>
+
+                    <div class="delivery-message assistant hidden" id="deliveryResult">
+                        <strong>Delivery ready</strong>
+                        <span>Open the artifact to edit the deck, regenerate it, or export PDF.</span>
+                        <div class="delivery-actions">
+                            <button id="deliveryOpenDeckBtn" type="button">Open delivered deck</button>
+                            <button id="deliveryPdfBtn" type="button">Download PDF</button>
+                            <button id="deliveryHtmlBtn" type="button">Download HTML</button>
+                        </div>
+                    </div>
+
+                    <div class="delivery-message assistant failed hidden" id="deliveryFailure">
+                        <strong>Generation failed</strong>
+                        <span id="deliveryFailureText">Please retry in a moment.</span>
+                        <div class="delivery-actions">
+                            <button id="deliveryRetryBtn" type="button">Retry</button>
+                        </div>
+                    </div>
+                </section>
+            </section>
+        </section>
+
+        <section class="workspace hidden" id="workspaceView">
             <aside class="chat-pane">
                 <div class="workspace-head">
-                    <button id="backHomeBtn" type="button">← Home</button>
                     <div>
                         <strong id="deckTitle">Generated deck</strong>
                         <span id="deckMeta">HTML Slides</span>
@@ -198,6 +227,7 @@
                         <button id="exportBtn" type="button">Download HTML</button>
                         <button id="exportPdfBtn" type="button">Export PDF</button>
                         <button id="expandBtn" type="button">Expand</button>
+                        <button class="preview-close-btn" id="closePreviewBtn" type="button" title="Close preview" aria-label="Close preview">×</button>
                     </div>
                 </header>
                 <div class="preview-stage" id="previewStage">
@@ -218,28 +248,6 @@
             </section>
         </section>
     </main>
-
-    <dialog class="model-dialog" id="modelDialog">
-        <form class="model-card" id="modelForm">
-            <header>
-                <strong>Model configuration</strong>
-                <button type="button" id="closeModelBtn" value="cancel">×</button>
-            </header>
-            <label>Provider<input id="providerInput" value="OpenAI"></label>
-            <label>Base URL<input id="baseUrlInput" value="https://api.openai.com/v1" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"></label>
-            <label>Model<input id="modelInput" value="gpt-4.1" placeholder="qwen-plus"></label>
-            <label>API Key<input id="apiKeyInput" type="password" placeholder="Stored locally for this local demo"></label>
-            <p class="model-hint" id="modelHint">For Qwen, use DashScope compatible mode base URL and a qwen model name.</p>
-            <label>Output
-                <select id="outputInput">
-                    <option>Frontend (HTML)</option>
-                    <option>PowerPoint</option>
-                    <option>PDF</option>
-                </select>
-            </label>
-            <button class="save-model" type="submit">Save</button>
-        </form>
-    </dialog>
 
     <div class="fullscreen hidden" id="fullscreenView">
         <button class="close-fullscreen" id="closeFullscreenBtn" type="button">×</button>

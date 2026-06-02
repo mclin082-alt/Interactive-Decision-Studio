@@ -6,8 +6,10 @@ const { execFile } = require('child_process');
 const express = require('express');
 const { DatabaseSync } = require('node:sqlite');
 
-const PORT = Number(process.env.PORT || 5173);
 const ROOT = __dirname;
+loadLocalEnv(path.join(ROOT, '.env'));
+
+const PORT = Number(process.env.PORT || 5173);
 const PUBLIC = path.join(ROOT, 'public');
 const DATA_DIR = path.resolve(process.env.SLIDE_STUDIO_DATA_DIR || path.join(ROOT, '.local-data'));
 const JSON_DB_FILE = path.join(DATA_DIR, 'db.json');
@@ -16,6 +18,21 @@ const GENERATED_DIR = path.join(DATA_DIR, 'generated');
 const FRONTEND_SLIDES_DIR = process.env.FRONTEND_SLIDES_DIR || '/Users/lll/.codex/skills/frontend-slides';
 const TEMPLATE_DIR = path.join(FRONTEND_SLIDES_DIR, 'beautiful-html-templates', 'templates');
 const isProduction = process.env.NODE_ENV === 'production';
+const APP_BASE_URL = String(process.env.APP_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
+const QUOTAS = {
+  guestCookieDaily: Number(process.env.GUEST_COOKIE_DAILY_LIMIT || 3),
+  guestDeviceDaily: Number(process.env.GUEST_DEVICE_DAILY_LIMIT || 3),
+  guestBrowserDaily: Number(process.env.GUEST_BROWSER_DAILY_LIMIT || 3),
+  guestIpDaily: Number(process.env.GUEST_IP_DAILY_LIMIT || 5),
+  verifiedSignupCredits: Number(process.env.SIGNUP_VERIFIED_CREDITS || 10),
+  unverifiedUserDaily: Number(process.env.UNVERIFIED_USER_DAILY_LIMIT || 0),
+  freeDailyBudgetCents: Number(process.env.FREE_DAILY_BUDGET_CENTS || 500),
+  generationCostCents: Number(process.env.GENERATION_COST_CENTS || 25)
+};
+const BASIC_TRIAL_TEMPLATE_IDS = new Set((process.env.BASIC_TRIAL_TEMPLATE_IDS || 'soft-editorial,blue-professional')
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean));
 const CHROME_PATHS = [
   process.env.CHROME_PATH,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -27,6 +44,24 @@ const CHROME_PATHS = [
 ].filter(Boolean);
 let sqliteDb = null;
 let isMigratingLegacyDb = false;
+const activeGenerationJobs = new Set();
+
+function loadLocalEnv(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (process.env[key] !== undefined) continue;
+    const value = rawValue
+      .trim()
+      .replace(/^(['"])(.*)\1$/, '$2');
+    process.env[key] = value;
+  }
+}
 
 function ensureDb() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -44,20 +79,28 @@ function ensureDb() {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS usage_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      identity_type TEXT NOT NULL,
+      identity_key TEXT NOT NULL,
+      action TEXT NOT NULL,
+      cost_cents INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS email_verification_tokens (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS model_configs (
-      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      provider TEXT NOT NULL,
-      model TEXT NOT NULL,
-      base_url TEXT NOT NULL,
-      api_key TEXT,
-      output TEXT NOT NULL,
-      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS decks (
@@ -130,6 +173,10 @@ function ensureDb() {
       created_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, 'users', 'email_verified_at', 'TEXT');
+  ensureColumn(db, 'users', 'credits', 'INTEGER DEFAULT 0');
+  ensureColumn(db, 'users', 'plan', "TEXT DEFAULT 'free'");
+  ensureColumn(db, 'users', 'is_guest', 'INTEGER DEFAULT 0');
   const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
   if (!isMigratingLegacyDb && userCount === 0 && fs.existsSync(JSON_DB_FILE)) {
     try {
@@ -144,6 +191,11 @@ function ensureDb() {
   }
 }
 
+function ensureColumn(db, table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+  if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 function getSqliteDb() {
   if (!sqliteDb) sqliteDb = new DatabaseSync(DB_FILE);
   return sqliteDb;
@@ -154,32 +206,26 @@ function normalizeDbShape(db = {}) {
     users: Array.isArray(db.users) ? db.users : [],
     sessions: db.sessions && typeof db.sessions === 'object' ? db.sessions : {},
     decks: Array.isArray(db.decks) ? db.decks : [],
-    logs: Array.isArray(db.logs) ? db.logs : []
+    logs: Array.isArray(db.logs) ? db.logs : [],
+    usageEvents: Array.isArray(db.usageEvents) ? db.usageEvents : [],
+    verificationTokens: Array.isArray(db.verificationTokens) ? db.verificationTokens : []
   };
 }
 
 function readDb() {
   ensureDb();
   const db = getSqliteDb();
-  const modelRows = db.prepare('SELECT * FROM model_configs').all();
-  const modelByUser = new Map(modelRows.map((row) => [row.user_id, row]));
-  const users = db.prepare('SELECT * FROM users ORDER BY created_at ASC').all().map((row) => {
-    const modelConfig = modelByUser.get(row.id);
-    return {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      passwordHash: row.password_hash,
-      createdAt: row.created_at,
-      modelConfig: modelConfig ? {
-        provider: modelConfig.provider,
-        model: modelConfig.model,
-        baseUrl: modelConfig.base_url,
-        apiKey: modelConfig.api_key || '',
-        output: modelConfig.output
-      } : undefined
-    };
-  });
+  const users = db.prepare('SELECT * FROM users ORDER BY created_at ASC').all().map((row) => ({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    passwordHash: row.password_hash,
+    createdAt: row.created_at,
+    emailVerifiedAt: row.email_verified_at || '',
+    credits: Number(row.credits || 0),
+    plan: row.plan || 'free',
+    isGuest: Boolean(row.is_guest)
+  }));
   const sessions = Object.fromEntries(db.prepare('SELECT * FROM sessions').all().map((row) => [
     row.token,
     { userId: row.user_id, createdAt: row.created_at }
@@ -242,7 +288,23 @@ function readDb() {
     meta: row.meta_json ? JSON.parse(row.meta_json) : {},
     createdAt: row.created_at
   }));
-  return { users, sessions, decks, logs };
+  const usageEvents = db.prepare('SELECT * FROM usage_events ORDER BY datetime(created_at) DESC LIMIT 5000').all().map((row) => ({
+    id: row.id,
+    userId: row.user_id || '',
+    identityType: row.identity_type,
+    identityKey: row.identity_key,
+    action: row.action,
+    costCents: Number(row.cost_cents || 0),
+    createdAt: row.created_at
+  }));
+  const verificationTokens = db.prepare('SELECT * FROM email_verification_tokens ORDER BY datetime(created_at) DESC').all().map((row) => ({
+    token: row.token,
+    userId: row.user_id,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    usedAt: row.used_at || ''
+  }));
+  return { users, sessions, decks, logs, usageEvents, verificationTokens };
 }
 
 function writeDb(db) {
@@ -253,17 +315,19 @@ function writeDb(db) {
     sqlite.exec('BEGIN');
     sqlite.exec(`
       DELETE FROM logs;
+      DELETE FROM usage_events;
+      DELETE FROM email_verification_tokens;
       DELETE FROM template_selections;
       DELETE FROM deck_versions;
       DELETE FROM deck_comments;
       DELETE FROM deck_messages;
       DELETE FROM decks;
-      DELETE FROM model_configs;
       DELETE FROM sessions;
       DELETE FROM users;
     `);
-    const insertUser = sqlite.prepare('INSERT INTO users (id, name, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?)');
-    const insertModel = sqlite.prepare('INSERT INTO model_configs (user_id, provider, model, base_url, api_key, output, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    const insertUser = sqlite.prepare(`INSERT INTO users (
+      id, name, email, password_hash, created_at, email_verified_at, credits, plan, is_guest
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertSession = sqlite.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)');
     const insertDeck = sqlite.prepare(`INSERT INTO decks (
       id, user_id, prompt, template_id, template_slug, title, deck_path, file_path, original_html_path, status,
@@ -276,11 +340,25 @@ function writeDb(db) {
     const insertVersion = sqlite.prepare('INSERT INTO deck_versions (id, deck_id, label, file_path, created_at) VALUES (?, ?, ?, ?, ?)');
     const insertTemplateSelection = sqlite.prepare('INSERT INTO template_selections (id, user_id, deck_id, template_id, template_slug, selected_at) VALUES (?, ?, ?, ?, ?, ?)');
     const insertLog = sqlite.prepare('INSERT INTO logs (id, level, message, meta_json, created_at) VALUES (?, ?, ?, ?, ?)');
+    const insertUsage = sqlite.prepare(`INSERT INTO usage_events (
+      id, user_id, identity_type, identity_key, action, cost_cents, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const insertVerificationToken = sqlite.prepare(`INSERT INTO email_verification_tokens (
+      token, user_id, created_at, expires_at, used_at
+    ) VALUES (?, ?, ?, ?, ?)`);
 
     for (const user of data.users) {
-      insertUser.run(user.id, user.name, user.email, user.passwordHash, user.createdAt || new Date().toISOString());
-      const modelConfig = normalizeProviderConfig(user.modelConfig || {});
-      insertModel.run(user.id, modelConfig.provider, modelConfig.model, modelConfig.baseUrl, modelConfig.apiKey || '', modelConfig.output, new Date().toISOString());
+      insertUser.run(
+        user.id,
+        user.name,
+        user.email,
+        user.passwordHash,
+        user.createdAt || new Date().toISOString(),
+        user.emailVerifiedAt || '',
+        Number(user.credits || 0),
+        user.plan || 'free',
+        user.isGuest ? 1 : 0
+      );
     }
     for (const [token, session] of Object.entries(data.sessions)) {
       if (data.users.some((user) => user.id === session.userId)) insertSession.run(token, session.userId, session.createdAt || new Date().toISOString());
@@ -342,6 +420,22 @@ function writeDb(db) {
     for (const entry of data.logs.slice(0, 200)) {
       insertLog.run(entry.id || crypto.randomUUID(), entry.level || 'info', entry.message || 'Event', JSON.stringify(entry.meta || {}), entry.createdAt || new Date().toISOString());
     }
+    for (const entry of data.usageEvents.slice(0, 5000)) {
+      insertUsage.run(
+        entry.id || crypto.randomUUID(),
+        entry.userId || '',
+        entry.identityType || 'user',
+        entry.identityKey || entry.userId || '',
+        entry.action || 'generate',
+        Number(entry.costCents || 0),
+        entry.createdAt || new Date().toISOString()
+      );
+    }
+    for (const entry of data.verificationTokens) {
+      if (data.users.some((user) => user.id === entry.userId)) {
+        insertVerificationToken.run(entry.token, entry.userId, entry.createdAt || new Date().toISOString(), entry.expiresAt || new Date().toISOString(), entry.usedAt || '');
+      }
+    }
     sqlite.exec('COMMIT');
   } catch (error) {
     try {
@@ -402,20 +496,186 @@ function getUser(req, db) {
 
 function publicUser(user) {
   if (!user) return null;
-  const modelConfig = user.modelConfig || {};
   return {
     id: user.id,
     name: user.name,
-    email: user.email,
-    modelConfig: {
-      provider: modelConfig.provider || 'OpenAI',
-      model: modelConfig.model || 'gpt-4.1',
-      baseUrl: modelConfig.baseUrl || 'https://api.openai.com/v1',
-      apiKeyHint: modelConfig.apiKey ? `saved-${String(modelConfig.apiKey).slice(-4)}` : modelConfig.apiKeyHint || '',
-      hasApiKey: Boolean(modelConfig.apiKey),
-      output: modelConfig.output || 'Frontend (HTML)'
+    email: user.isGuest ? '' : user.email,
+    isGuest: Boolean(user.isGuest),
+    emailVerified: Boolean(user.emailVerifiedAt),
+    credits: Number(user.credits || 0),
+    plan: user.plan || 'free'
+  };
+}
+
+function hashIdentity(value) {
+  return crypto.createHash('sha256').update(String(value || 'unknown')).digest('hex').slice(0, 32);
+}
+
+function dayKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getClientIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.socket.remoteAddress || req.ip || 'unknown';
+}
+
+function getTrialCookie(req) {
+  return req._trialId || parseCookies(req).trial_id || '';
+}
+
+function setTrialCookie(res, trialId, maxAge = 60 * 60 * 24 * 90) {
+  const parts = [`trial_id=${encodeURIComponent(trialId)}`, 'HttpOnly', 'SameSite=Lax', 'Path=/', `Max-Age=${maxAge}`];
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function browserFingerprint(req) {
+  return hashIdentity([
+    req.headers['user-agent'] || '',
+    req.headers['accept-language'] || '',
+    req.headers['accept-encoding'] || ''
+  ].join('|'));
+}
+
+function getDeviceFingerprint(req) {
+  return hashIdentity(req.headers['x-device-id'] || req.headers['user-agent'] || 'unknown-device');
+}
+
+function countUsageToday(db, predicate) {
+  const today = dayKey();
+  return (db.usageEvents || []).filter((entry) => String(entry.createdAt || '').startsWith(today) && predicate(entry)).length;
+}
+
+function freeSpendToday(db) {
+  const today = dayKey();
+  return (db.usageEvents || [])
+    .filter((entry) => String(entry.createdAt || '').startsWith(today) && entry.action === 'generate')
+    .reduce((sum, entry) => sum + Number(entry.costCents || 0), 0);
+}
+
+function usageSummaryForUser(db, user, req) {
+  if (!user || user.isGuest) {
+    const trialId = getTrialCookie(req);
+    return {
+      tier: 'guest',
+      remaining: Math.max(0, QUOTAS.guestCookieDaily - countUsageToday(db, (entry) => entry.identityType === 'cookie' && entry.identityKey === hashIdentity(trialId))),
+      dailyBudgetRemainingCents: Math.max(0, QUOTAS.freeDailyBudgetCents - freeSpendToday(db))
+    };
+  }
+  return {
+    tier: user.emailVerifiedAt ? user.plan || 'free' : 'unverified',
+    remaining: user.emailVerifiedAt ? Number(user.credits || 0) : QUOTAS.unverifiedUserDaily,
+    dailyBudgetRemainingCents: Math.max(0, QUOTAS.freeDailyBudgetCents - freeSpendToday(db))
+  };
+}
+
+function createGuestUserAndSession(req, res, db) {
+  let trialId = getTrialCookie(req);
+  if (!trialId) {
+    trialId = crypto.randomBytes(18).toString('hex');
+    setTrialCookie(res, trialId);
+  }
+  req._trialId = trialId;
+  const email = `guest-${hashIdentity(trialId)}@guest.slidestudio.local`;
+  let guest = db.users.find((user) => user.email === email);
+  if (!guest) {
+    guest = {
+      id: `guest-${crypto.randomUUID()}`,
+      name: 'Guest',
+      email,
+      passwordHash: hashPassword(crypto.randomBytes(32).toString('hex')),
+      createdAt: new Date().toISOString(),
+      emailVerifiedAt: '',
+      credits: 0,
+      plan: 'trial',
+      isGuest: true
+    };
+    db.users.push(guest);
+  }
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  db.sessions[sessionToken] = { userId: guest.id, createdAt: new Date().toISOString() };
+  setSessionCookie(res, sessionToken);
+  return guest;
+}
+
+function ensureGenerationAllowance({ req, res, db, user, template }) {
+  const spend = freeSpendToday(db);
+  if (spend + QUOTAS.generationCostCents > QUOTAS.freeDailyBudgetCents) {
+    return { error: '今日免费额度已用完，请稍后再试或升级付费额度。', status: 429 };
+  }
+
+  const now = new Date().toISOString();
+  if (!user || user.isGuest) {
+    if (!BASIC_TRIAL_TEMPLATE_IDS.has(template.id)) {
+      return { error: '未登录试用只能使用基础模板。注册并验证邮箱后可使用更多模板。', status: 403 };
+    }
+    const trialId = getTrialCookie(req) || crypto.randomBytes(18).toString('hex');
+    if (!getTrialCookie(req)) setTrialCookie(res, trialId);
+    req._trialId = trialId;
+    const identities = [
+      ['cookie', hashIdentity(trialId), QUOTAS.guestCookieDaily],
+      ['device', getDeviceFingerprint(req), QUOTAS.guestDeviceDaily],
+      ['browser', browserFingerprint(req), QUOTAS.guestBrowserDaily],
+      ['ip', hashIdentity(getClientIp(req)), QUOTAS.guestIpDaily]
+    ];
+    const exceeded = identities.find(([type, key, limit]) => countUsageToday(db, (entry) => entry.identityType === type && entry.identityKey === key) >= limit);
+    if (exceeded) {
+      return { error: '免费试用额度已用完。注册并验证邮箱后可获得正式额度。', status: 429 };
+    }
+    return {
+      spend: () => {
+        for (const [type, key] of identities) {
+          db.usageEvents.unshift({
+            id: crypto.randomUUID(),
+            userId: user?.id || '',
+            identityType: type,
+            identityKey: key,
+            action: 'generate',
+            costCents: type === 'cookie' ? QUOTAS.generationCostCents : 0,
+            createdAt: now
+          });
+        }
+      }
+    };
+  }
+
+  if (!user.emailVerifiedAt) {
+    const used = countUsageToday(db, (entry) => entry.identityType === 'user' && entry.identityKey === user.id);
+    if (used >= QUOTAS.unverifiedUserDaily) {
+      return { error: '请先验证邮箱，验证后会发放正式免费额度。', status: 403 };
+    }
+  } else if ((user.plan || 'free') !== 'paid') {
+    if (Number(user.credits || 0) <= 0) return { error: '你的免费额度已用完，可以购买额度继续生成。', status: 402 };
+  }
+
+  return {
+    spend: () => {
+      if (user.emailVerifiedAt && (user.plan || 'free') !== 'paid') user.credits = Math.max(0, Number(user.credits || 0) - 1);
+      db.usageEvents.unshift({
+        id: crypto.randomUUID(),
+        userId: user.id,
+        identityType: 'user',
+        identityKey: user.id,
+        action: 'generate',
+        costCents: QUOTAS.generationCostCents,
+        createdAt: now
+      });
     }
   };
+}
+
+function createEmailVerification(db, user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 3).toISOString();
+  db.verificationTokens.unshift({
+    token,
+    userId: user.id,
+    createdAt: now.toISOString(),
+    expiresAt,
+    usedAt: ''
+  });
+  return `${APP_BASE_URL}/api/verify-email?token=${token}`;
 }
 
 function publicDeck(deck) {
@@ -425,6 +685,19 @@ function publicDeck(deck) {
   safeDeck.comments ||= [];
   safeDeck.versions = (safeDeck.versions || []).map(({ filePath: _filePath, ...version }) => version);
   return safeDeck;
+}
+
+function addDeckProgress(db, deck, title, detail = '', status = 'done') {
+  if (!deck) return;
+  deck.messages ||= [];
+  deck.messages.push({
+    id: crypto.randomUUID(),
+    role: 'progress',
+    text: JSON.stringify({ title, detail, status }),
+    createdAt: new Date().toISOString()
+  });
+  deck.updatedAt = new Date().toISOString();
+  writeDb(db);
 }
 
 function sanitizeFileName(name, fallback = 'slide-deck') {
@@ -496,7 +769,7 @@ function buildPrintableHtml(html) {
 function setSessionCookie(res, token, maxAge) {
   const parts = [`session=${token || ''}`, 'HttpOnly', 'SameSite=Lax', 'Path=/'];
   if (maxAge !== undefined) parts.push(`Max-Age=${maxAge}`);
-  res.setHeader('Set-Cookie', parts.join('; '));
+  res.append('Set-Cookie', parts.join('; '));
 }
 
 const templates = [
@@ -530,6 +803,21 @@ const FALLBACK_DESIGN_MD = `
 Design direction: premium productivity tool, editorial but practical. Use crisp typography, clear hierarchy, generous whitespace, visible data/storytelling blocks, and a balanced palette that is not dominated by a single hue. The deck should feel finished enough for a portfolio demo.
 `;
 
+const SLIDE_RUNTIME_CSS = `
+<style id="slide-studio-runtime-css">
+html, body { width: 100% !important; height: 100% !important; margin: 0 !important; overflow: hidden !important; }
+.deck-viewport { position: fixed !important; inset: 0 !important; overflow: hidden !important; }
+.deck-stage { position: absolute !important; left: 0 !important; top: 0 !important; width: 1920px !important; height: 1080px !important; overflow: hidden !important; transform-origin: 0 0 !important; }
+.deck-stage > .slide { position: absolute !important; inset: 0 !important; width: 1920px !important; height: 1080px !important; overflow: hidden !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }
+.deck-stage > .slide.active, .deck-stage > .slide.visible { visibility: visible !important; opacity: 1 !important; pointer-events: auto !important; z-index: 1 !important; }
+@media print {
+  html, body { width: 1920px !important; height: auto !important; overflow: visible !important; }
+  .deck-viewport, .deck-stage { position: static !important; transform: none !important; width: 1920px !important; height: auto !important; overflow: visible !important; }
+  .deck-stage > .slide { position: relative !important; display: block !important; visibility: visible !important; opacity: 1 !important; pointer-events: auto !important; width: 1920px !important; height: 1080px !important; break-after: page; page-break-after: always; transform: none !important; }
+  .deck-stage > .slide:last-child { break-after: auto; page-break-after: auto; }
+}
+</style>`;
+
 function readTextFile(filePath, fallback = '') {
   try {
     return fs.readFileSync(filePath, 'utf8');
@@ -558,6 +846,16 @@ function normalizeProviderConfig(config = {}) {
     apiKey: String(config.apiKey || '').trim(),
     output: String(config.output || 'Frontend (HTML)')
   };
+}
+
+function getServerModelConfig() {
+  return normalizeProviderConfig({
+    provider: process.env.OPENAI_PROVIDER || process.env.AI_PROVIDER || 'OpenAI',
+    model: process.env.OPENAI_MODEL || process.env.AI_MODEL || 'gpt-4.1',
+    baseUrl: process.env.OPENAI_BASE_URL || process.env.AI_BASE_URL || 'https://api.openai.com/v1',
+    apiKey: process.env.OPENAI_API_KEY || process.env.AI_API_KEY || '',
+    output: 'Frontend (HTML)'
+  });
 }
 
 function buildGenerationPrompt({ prompt, template, viewportBase, htmlTemplate, animationPatterns, designMd }) {
@@ -601,7 +899,7 @@ Generate the final deck now as one complete HTML file.`
 
 async function callChatCompletions({ modelConfig, messages }) {
   if (!modelConfig.apiKey) {
-    throw new Error('API key required. Open Model settings and save an OpenAI-compatible API key first.');
+    throw new Error('The server model API key is not configured yet. Ask the workspace owner to set OPENAI_API_KEY or AI_API_KEY.');
   }
   const endpoint = `${normalizeBaseUrl(modelConfig.baseUrl)}/chat/completions`;
   const body = {
@@ -649,7 +947,10 @@ function extractHtml(raw) {
   if (!/deck-stage/i.test(html) || !/class=["'][^"']*\bslide\b/i.test(html)) {
     throw new Error('Generated HTML is missing the fixed-stage slide structure.');
   }
-  return html;
+  html = html.replace(/<style id=["']slide-studio-runtime-css["'][\s\S]*?<\/style>\s*/i, '');
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${SLIDE_RUNTIME_CSS}\n</head>`);
+  if (/<body[\s>]/i.test(html)) return html.replace(/<body([^>]*)>/i, `<body$1>\n${SLIDE_RUNTIME_CSS}`);
+  return `${SLIDE_RUNTIME_CSS}\n${html}`;
 }
 
 function buildEditPrompt({ deck, currentHtml, instruction, currentPage, targetContext = '' }) {
@@ -768,12 +1069,15 @@ function applySearchReplaceEdits(currentHtml, patch) {
   return { html, summary: patch.summary || 'Applied the requested edit.', applied };
 }
 
-async function generateDeckHtml({ prompt, template, modelConfig }) {
+async function generateDeckHtml({ prompt, template, modelConfig, onProgress = async () => {} }) {
+  await onProgress('Loading template assets', `Reading ${template.name} rules and Slide Studio runtime files.`);
   const viewportBase = readTextFile(path.join(FRONTEND_SLIDES_DIR, 'viewport-base.css'), FALLBACK_VIEWPORT_BASE);
   const htmlTemplate = readTextFile(path.join(FRONTEND_SLIDES_DIR, 'html-template.md'), FALLBACK_HTML_TEMPLATE);
   const animationPatterns = readTextFile(path.join(FRONTEND_SLIDES_DIR, 'animation-patterns.md'), FALLBACK_ANIMATION_PATTERNS);
   const designMd = readTextFile(path.join(TEMPLATE_DIR, template.slug, 'design.md'), FALLBACK_DESIGN_MD);
+  await onProgress('Building generation prompt', 'Combining your request with the selected visual system and HTML requirements.');
   const generationPrompt = buildGenerationPrompt({ prompt, template, viewportBase, htmlTemplate, animationPatterns, designMd });
+  await onProgress('Calling the model', `Requesting a complete HTML deck from ${modelConfig.provider} / ${modelConfig.model}.`, 'active');
   const raw = await callChatCompletions({
     modelConfig,
     messages: [
@@ -781,6 +1085,7 @@ async function generateDeckHtml({ prompt, template, modelConfig }) {
       { role: 'user', content: generationPrompt.user }
     ]
   });
+  await onProgress('Validating generated HTML', 'Checking that the model returned a complete fixed-stage slide document.');
   return extractHtml(raw);
 }
 
@@ -852,25 +1157,20 @@ function seedDemoData() {
       email: demoEmail,
       passwordHash: hashPassword(demoPassword),
       createdAt: now,
-      modelConfig: {
-        provider: 'OpenAI',
-        model: process.env.OPENAI_MODEL || 'gpt-4.1',
-        baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-        apiKey: process.env.OPENAI_API_KEY || '',
-        output: 'Frontend (HTML)'
-      }
+      emailVerifiedAt: now,
+      credits: 999,
+      plan: 'paid',
+      isGuest: false
     };
     db.users.push(demoUser);
     changed = true;
   } else {
     demoUser.name ||= 'Demo User';
     demoUser.passwordHash ||= hashPassword(demoPassword);
-    demoUser.modelConfig ||= {};
-    demoUser.modelConfig.provider ||= 'OpenAI';
-    demoUser.modelConfig.model ||= process.env.OPENAI_MODEL || 'gpt-4.1';
-    demoUser.modelConfig.baseUrl ||= process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-    demoUser.modelConfig.output ||= 'Frontend (HTML)';
-    if (process.env.OPENAI_API_KEY && !demoUser.modelConfig.apiKey) demoUser.modelConfig.apiKey = process.env.OPENAI_API_KEY;
+    demoUser.emailVerifiedAt ||= now;
+    demoUser.credits = Math.max(Number(demoUser.credits || 0), 999);
+    demoUser.plan = 'paid';
+    demoUser.isGuest = false;
     changed = true;
   }
 
@@ -946,8 +1246,15 @@ function seedDemoData() {
 }
 
 async function runDeckGeneration({ db, user, deck, template }) {
-  const modelConfig = normalizeProviderConfig(user.modelConfig);
-  const html = await generateDeckHtml({ prompt: deck.prompt, template, modelConfig });
+  const modelConfig = getServerModelConfig();
+  addDeckProgress(db, deck, 'Checking model configuration', 'Confirming the server has an OpenAI-compatible model configured.');
+  const html = await generateDeckHtml({
+    prompt: deck.prompt,
+    template,
+    modelConfig,
+    onProgress: async (title, detail, status) => addDeckProgress(db, deck, title, detail, status)
+  });
+  addDeckProgress(db, deck, 'Writing presentation file', 'Saving the generated HTML deck into the project workspace.');
   const userDir = path.join(GENERATED_DIR, user.id);
   fs.mkdirSync(userDir, { recursive: true });
   const filePath = path.join(userDir, `${deck.id}.html`);
@@ -962,18 +1269,60 @@ async function runDeckGeneration({ db, user, deck, template }) {
   deck.comments ||= [];
   deck.versions ||= [];
   if (!deck.originalHtmlPath) {
+    addDeckProgress(db, deck, 'Saving original version', 'Creating the first restorable version for later edits.');
     const originalPath = path.join(userDir, `${deck.id}.original.html`);
     fs.copyFileSync(filePath, originalPath);
     deck.originalHtmlPath = originalPath;
   }
-  if (!deck.messages.length) {
+  if (!deck.messages.some((message) => message.role === 'assistant')) {
     deck.messages.push(
-      { id: crypto.randomUUID(), role: 'user', text: deck.prompt, createdAt: deck.createdAt },
       { id: crypto.randomUUID(), role: 'assistant', text: `Generated a real HTML deck with ${template.name}.`, createdAt: deck.updatedAt }
     );
   }
+  addDeckProgress(db, deck, 'Ready to deliver', 'The deck is complete. Open the delivered artifact to edit, regenerate, or export PDF.');
   writeDb(db);
   return deck;
+}
+
+function startDeckGenerationJob(deckId) {
+  if (!deckId || activeGenerationJobs.has(deckId)) return;
+  activeGenerationJobs.add(deckId);
+  setTimeout(async () => {
+    try {
+      const db = readDb();
+      const deck = db.decks.find((item) => item.id === deckId);
+      if (!deck) return;
+      const user = db.users.find((item) => item.id === deck.userId);
+      if (!user) {
+        deck.status = 'failed';
+        deck.error = 'The user for this deck no longer exists.';
+        deck.completedAt = new Date().toISOString();
+        writeDb(db);
+        return;
+      }
+      const template = templates.find((item) => item.id === deck.templateId) || templates[0];
+      await runDeckGeneration({ db, user, deck, template });
+      logEvent('info', 'Deck generated in background', { userId: user.id, templateId: template.id, deckId: deck.id });
+    } catch (error) {
+      try {
+        const db = readDb();
+        const deck = db.decks.find((item) => item.id === deckId);
+        if (deck) {
+          addDeckProgress(db, deck, 'Generation failed', error.message || 'Generation failed.', 'failed');
+          deck.status = 'failed';
+          deck.error = error.message || 'Generation failed.';
+          deck.completedAt = new Date().toISOString();
+          deck.updatedAt = deck.completedAt;
+          writeDb(db);
+          logEvent('error', 'Background deck generation failed', { userId: deck.userId, templateId: deck.templateId, deckId, message: deck.error });
+        }
+      } catch (persistError) {
+        logEvent('error', 'Could not persist background generation failure', { deckId, message: persistError.message });
+      }
+    } finally {
+      activeGenerationJobs.delete(deckId);
+    }
+  }, 0);
 }
 
 function createApiRouter() {
@@ -991,7 +1340,8 @@ function createApiRouter() {
 
   router.get('/me', (req, res) => {
     const db = readDb();
-    res.json({ user: publicUser(getUser(req, db)) });
+    const user = getUser(req, db);
+    res.json({ user: publicUser(user), quota: usageSummaryForUser(db, user, req) });
   });
 
   router.post('/signup', (req, res) => {
@@ -1007,15 +1357,38 @@ function createApiRouter() {
       name,
       email,
       passwordHash: hashPassword(password),
-      modelConfig: { provider: 'OpenAI', model: 'gpt-4.1', baseUrl: 'https://api.openai.com/v1', output: 'Frontend (HTML)' }
+      createdAt: new Date().toISOString(),
+      emailVerifiedAt: '',
+      credits: 0,
+      plan: 'free',
+      isGuest: false
     };
     db.users.push(newUser);
+    const verificationLink = createEmailVerification(db, newUser);
     const token = crypto.randomBytes(32).toString('hex');
     db.sessions[token] = { userId: newUser.id, createdAt: new Date().toISOString() };
     writeDb(db);
     setSessionCookie(res, token);
-    logEvent('info', 'User signed up', { email });
-    res.json({ user: publicUser(newUser) });
+    logEvent('info', 'User signed up; email verification link created', { email, verificationLink });
+    res.json({ user: publicUser(newUser), requiresVerification: true, verificationLink });
+  });
+
+  router.get('/verify-email', (req, res) => {
+    const db = readDb();
+    const token = String(req.query.token || '').trim();
+    const entry = (db.verificationTokens || []).find((item) => item.token === token);
+    if (!entry || entry.usedAt) return res.status(400).send('Verification link is invalid or already used.');
+    if (new Date(entry.expiresAt).getTime() < Date.now()) return res.status(400).send('Verification link has expired.');
+    const user = db.users.find((item) => item.id === entry.userId);
+    if (!user) return res.status(404).send('User not found.');
+    entry.usedAt = new Date().toISOString();
+    if (!user.emailVerifiedAt) {
+      user.emailVerifiedAt = entry.usedAt;
+      user.credits = Number(user.credits || 0) + QUOTAS.verifiedSignupCredits;
+    }
+    writeDb(db);
+    logEvent('info', 'Email verified', { email: user.email, credits: user.credits });
+    res.send(`Email verified. ${QUOTAS.verifiedSignupCredits} credits have been added. You can return to Slide Studio.`);
   });
 
   router.post('/login', (req, res) => {
@@ -1030,10 +1403,11 @@ function createApiRouter() {
 
     const token = crypto.randomBytes(32).toString('hex');
     db.sessions[token] = { userId: found.id, createdAt: new Date().toISOString() };
+    const verificationLink = found.emailVerifiedAt ? '' : createEmailVerification(db, found);
     writeDb(db);
     setSessionCookie(res, token);
     logEvent('info', 'User logged in', { email });
-    res.json({ user: publicUser(found) });
+    res.json({ user: publicUser(found), requiresVerification: Boolean(verificationLink), verificationLink });
   });
 
   router.post('/logout', (req, res) => {
@@ -1045,38 +1419,27 @@ function createApiRouter() {
     res.json({ ok: true });
   });
 
-  router.post('/model-config', (req, res) => {
-    const db = readDb();
-    const user = getUser(req, db);
-    if (!user) return res.status(401).json({ error: 'Login required.' });
-    const incoming = normalizeProviderConfig({
-      provider: req.body.provider,
-      model: req.body.model,
-      baseUrl: req.body.baseUrl,
-      apiKey: req.body.apiKey || user.modelConfig?.apiKey,
-      output: req.body.output
-    });
-    user.modelConfig = incoming;
-    writeDb(db);
-    logEvent('info', 'Model settings saved', { userId: user.id, provider: user.modelConfig.provider, model: user.modelConfig.model });
-    res.json({ user: publicUser(user) });
-  });
-
   router.post('/generate', async (req, res) => {
     const db = readDb();
-    const user = getUser(req, db);
-    if (!user) return res.status(401).json({ error: 'Login required.' });
-    const template = templates.find((item) => item.id === req.body.templateId) || templates[0];
+    let user = getUser(req, db);
+    const requestedTemplate = templates.find((item) => item.id === req.body.templateId) || templates[0];
+    const template = (!user || user.isGuest) && !BASIC_TRIAL_TEMPLATE_IDS.has(requestedTemplate.id)
+      ? templates.find((item) => BASIC_TRIAL_TEMPLATE_IDS.has(item.id)) || requestedTemplate
+      : requestedTemplate;
     const prompt = String(req.body.prompt || '').trim();
     if (!prompt) {
-      logEvent('error', 'Generate failed: empty prompt', { userId: user.id });
+      logEvent('error', 'Generate failed: empty prompt', { userId: user?.id || 'guest' });
       return res.status(400).json({ error: 'Prompt is required.' });
     }
+    if (!user) user = createGuestUserAndSession(req, res, db);
+    const allowance = ensureGenerationAllowance({ req, res, db, user, template });
+    if (allowance.error) return res.status(allowance.status || 429).json({ error: allowance.error, user: publicUser(user), quota: usageSummaryForUser(db, user, req) });
+    allowance.spend();
 
     const deck = {
       id: crypto.randomUUID(),
       userId: user.id,
-      prompt,
+      prompt: user.isGuest ? `${prompt}\n\nTrial constraint: create a concise basic deck with no more than 5 slides.` : prompt,
       templateId: template.id,
       templateSlug: template.slug,
       title: prompt.slice(0, 56),
@@ -1085,15 +1448,23 @@ function createApiRouter() {
       createdAt: new Date().toISOString(),
       completedAt: '',
       error: '',
-      comments: []
+      comments: [],
+      messages: [
+        { id: crypto.randomUUID(), role: 'user', text: prompt, createdAt: new Date().toISOString() }
+      ]
     };
     db.decks.unshift(deck);
+    addDeckProgress(db, deck, 'Queued generation task', 'Created a deck job and handed it to the server worker.');
     writeDb(db);
     logEvent('info', 'Deck generation started', { userId: user.id, templateId: template.id, deckId: deck.id });
+    if (req.body.async) {
+      startDeckGenerationJob(deck.id);
+      return res.status(202).json({ deck: publicDeck(deck), user: publicUser(user), quota: usageSummaryForUser(db, user, req) });
+    }
     try {
       await runDeckGeneration({ db, user, deck, template });
       logEvent('info', 'Deck generated', { userId: user.id, templateId: template.id, deckId: deck.id });
-      return res.json({ deck: publicDeck(deck) });
+      return res.json({ deck: publicDeck(deck), user: publicUser(user), quota: usageSummaryForUser(db, user, req) });
     } catch (error) {
       deck.status = 'failed';
       deck.error = error.message || 'Generation failed.';
@@ -1111,11 +1482,21 @@ function createApiRouter() {
     const deck = db.decks.find((item) => item.id === req.params.deckId && item.userId === user.id);
     if (!deck) return res.status(404).json({ error: 'Deck not found.' });
     const template = templates.find((item) => item.id === deck.templateId) || templates[0];
+    const allowance = ensureGenerationAllowance({ req, res, db, user, template });
+    if (allowance.error) return res.status(allowance.status || 429).json({ error: allowance.error, deck: publicDeck(deck), quota: usageSummaryForUser(db, user, req) });
+    allowance.spend();
     deck.status = 'generating';
     deck.error = '';
     deck.completedAt = '';
+    deck.updatedAt = new Date().toISOString();
+    deck.messages = (deck.messages || []).filter((message) => message.role !== 'progress');
+    addDeckProgress(db, deck, 'Queued retry task', 'Restarted generation for this deck using the same prompt and template.');
     writeDb(db);
     logEvent('info', 'Deck retry started', { userId: user.id, templateId: template.id, deckId: deck.id });
+    if (req.body.async) {
+      startDeckGenerationJob(deck.id);
+      return res.status(202).json({ deck: publicDeck(deck) });
+    }
     try {
       await runDeckGeneration({ db, user, deck, template });
       logEvent('info', 'Deck retry generated', { userId: user.id, templateId: template.id, deckId: deck.id });
@@ -1216,7 +1597,7 @@ function createApiRouter() {
         deck,
         instruction,
         currentPage,
-        modelConfig: normalizeProviderConfig(user.modelConfig)
+        modelConfig: getServerModelConfig()
       });
       fs.writeFileSync(deck.filePath, updatedHtml);
       deck.status = 'complete';
@@ -1346,7 +1727,7 @@ function createApiRouter() {
         deck,
         instruction: `Apply this annotation precisely: ${instruction}`,
         currentPage,
-        modelConfig: normalizeProviderConfig(user.modelConfig)
+        modelConfig: getServerModelConfig()
       });
       fs.writeFileSync(deck.filePath, updatedHtml);
       comment.status = 'resolved';

@@ -9,11 +9,28 @@ const state = {
   annotate: false,
   isGenerating: false,
   isEditing: false,
+  deliveryDeck: null,
+  deliveryStartedAt: 0,
+  deliveryPollTimer: null,
+  deliveryElapsedTimer: null,
+  deliveryDownloadStarted: false,
   pendingAnnotation: null,
-  errors: []
+  errors: [],
+  quota: null,
+  verificationLink: ''
 };
 
 const $ = (selector) => document.querySelector(selector);
+
+function getDeviceId() {
+  const key = 'slideStudioDeviceId';
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
 
 function clientLog(level, message, meta = {}) {
   fetch('/api/logs', {
@@ -66,7 +83,7 @@ async function api(path, options = {}) {
   try {
     const response = await fetch(path, {
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      headers: { 'Content-Type': 'application/json', 'X-Device-Id': getDeviceId(), ...(options.headers || {}) },
       ...options,
       body: options.body ? JSON.stringify(options.body) : undefined
     });
@@ -95,7 +112,7 @@ async function api(path, options = {}) {
 }
 
 function show(view) {
-  ['authView', 'homeView', 'workspaceView'].forEach((id) => {
+  ['authView', 'homeView', 'deliveryView', 'workspaceView'].forEach((id) => {
     document.getElementById(id).classList.toggle('hidden', id !== view);
   });
 }
@@ -106,24 +123,48 @@ function setUser(user) {
     state.recentDecks = [];
     state.activeDeck = null;
     renderDeckList();
-    show('authView');
+    $('#accountName').textContent = 'Guest trial';
+    $('#sidebarAvatar').textContent = '?';
+    $('#sidebarAccountName').textContent = 'Guest trial';
+    $('#sidebarAccountEmail').textContent = 'Local workspace';
+    $('#logoutBtn').textContent = 'Sign in';
+    renderQuota();
+    show('homeView');
     return;
   }
-  $('#accountName').textContent = user.name;
-  $('#userButton').textContent = user.name.slice(0, 1).toUpperCase();
-  $('#providerInput').value = user.modelConfig?.provider || 'OpenAI';
-  $('#baseUrlInput').value = user.modelConfig?.baseUrl || 'https://api.openai.com/v1';
-  $('#modelInput').value = user.modelConfig?.model || 'gpt-4.1';
-  $('#outputInput').value = user.modelConfig?.output || 'Frontend (HTML)';
-  $('#modelHint').textContent = user.modelConfig?.hasApiKey
-    ? `API key saved (${user.modelConfig.apiKeyHint}).`
-    : 'For Qwen, use DashScope compatible mode base URL and a qwen model name.';
+  $('#accountName').textContent = user.isGuest ? 'Guest trial' : user.name;
+  $('#sidebarAvatar').textContent = user.isGuest ? '?' : user.name.slice(0, 1).toUpperCase();
+  $('#sidebarAccountName').textContent = user.isGuest ? 'Guest trial' : user.name;
+  $('#sidebarAccountEmail').textContent = user.email || 'Local workspace';
+  $('#logoutBtn').textContent = user.isGuest ? 'Sign in' : 'Logout';
+  renderQuota();
   show('homeView');
   loadDecks();
 }
 
+function setQuota(quota) {
+  state.quota = quota || null;
+  renderQuota();
+}
+
+function renderQuota() {
+  const node = $('#quotaStatus');
+  if (!node) return;
+  const quota = state.quota;
+  if (!state.user || state.user.isGuest) {
+    const remaining = quota?.remaining ?? 3;
+    node.innerHTML = `<strong>Free trial</strong><span>${remaining} basic generations left today. Register and verify email for 10 credits.</span>`;
+    return;
+  }
+  if (!state.user.emailVerified) {
+    node.innerHTML = `<strong>Email verification needed</strong><span>Verify your email to unlock ${state.user.credits || 0} + 10 official credits.</span>`;
+    return;
+  }
+  node.innerHTML = `<strong>${state.user.plan === 'paid' ? 'Paid plan' : 'Free credits'}</strong><span>${state.user.plan === 'paid' ? 'Higher limits enabled.' : `${state.user.credits} generations remaining.`}</span>`;
+}
+
 function setRailActive(action) {
-  document.querySelectorAll('.rail-button').forEach((button) => {
+  document.querySelectorAll('.sidebar-action[data-rail-action]').forEach((button) => {
     button.classList.toggle('active', button.dataset.railAction === action);
   });
 }
@@ -135,7 +176,7 @@ function cacheBust(path, updatedAt = '') {
 }
 
 function renderDeckList() {
-  const lists = [$('#deckList'), $('#homeDeckList')].filter(Boolean);
+  const lists = [$('#deckList'), $('#sidebarDeckList')].filter(Boolean);
   if (!lists.length) return;
   if (!state.recentDecks.length) {
     lists.forEach((list) => {
@@ -237,7 +278,9 @@ function setGenerateState(active) {
     $('#generationStatus').classList.remove('hidden');
     $('#generationStatus').classList.remove('failed');
     $('#generationStatusTitle').textContent = 'Generating real HTML slides';
-    $('#generationStatusDetail').textContent = 'Reading template rules, calling your API, then saving a preview file.';
+    $('#generationStatusDetail').textContent = 'Reading template rules, generating the deck, then saving a preview file.';
+  } else if (!$('#generationStatus').classList.contains('failed')) {
+    $('#generationStatus').classList.add('hidden');
   }
 }
 
@@ -245,9 +288,129 @@ function setGenerationFailure(message, deck = null) {
   $('#generationStatus').classList.remove('hidden');
   $('#generationStatus').classList.add('failed');
   $('#generationStatusTitle').textContent = 'Generation failed';
-  $('#generationStatusDetail').textContent = message || 'Check your API settings and retry.';
+  $('#generationStatusDetail').textContent = message || 'Please retry in a moment.';
   $('#retryGenerateBtn').classList.toggle('hidden', !deck?.id);
   $('#retryGenerateBtn').dataset.deckId = deck?.id || '';
+}
+
+function parseProgressMessage(message) {
+  try {
+    const parsed = JSON.parse(message.text || '{}');
+    return {
+      id: message.id,
+      title: parsed.title || message.text || 'Working',
+      detail: parsed.detail || '',
+      status: parsed.status || 'done',
+      createdAt: message.createdAt
+    };
+  } catch (error) {
+    return {
+      id: message.id,
+      title: message.text || 'Working',
+      detail: '',
+      status: 'done',
+      createdAt: message.createdAt
+    };
+  }
+}
+
+function progressMessages(deck) {
+  return (deck?.messages || [])
+    .filter((message) => message.role === 'progress')
+    .map(parseProgressMessage);
+}
+
+function renderWorkingSteps(deck) {
+  const events = progressMessages(deck);
+  if (!events.length) {
+    $('#workingSteps').innerHTML = `
+      <div class="working-step active">
+        <div>
+          <strong>Starting generation</strong>
+          <span>Waiting for the server worker to report its first real step.</span>
+        </div>
+      </div>
+    `;
+    return;
+  }
+  $('#workingSteps').innerHTML = events.map((step, index) => {
+    const isLast = index === events.length - 1;
+    const active = deck?.status === 'generating' && isLast && step.status !== 'failed';
+    const failed = step.status === 'failed';
+    return `
+      <div class="working-step ${active ? 'active' : 'done'} ${failed ? 'failed' : ''}">
+        <div>
+          <strong>${step.title}</strong>
+          <span>${step.detail}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function updateDeliveryElapsed() {
+  if (!state.deliveryStartedAt) return;
+  const seconds = Math.max(0, Math.floor((Date.now() - state.deliveryStartedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const label = minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  $('#workingElapsed').textContent = label;
+  $('#workingSummary').textContent = state.deliveryDeck?.status === 'complete' ? `Worked for ${label}` : `Working for ${label}`;
+}
+
+function stopDeliveryTimers() {
+  clearInterval(state.deliveryPollTimer);
+  clearInterval(state.deliveryElapsedTimer);
+  state.deliveryPollTimer = null;
+  state.deliveryElapsedTimer = null;
+}
+
+function renderDelivery(deck) {
+  state.deliveryDeck = deck;
+  $('#deliveryPrompt').textContent = deck?.prompt || 'Create a slide deck.';
+  $('#deliveryDeckName').textContent = deck?.title || 'Generating deck';
+  $('#deliveryStatusPill').textContent = deck?.status === 'complete' ? 'Ready' : deck?.status === 'failed' ? 'Failed' : 'Generating';
+  $('#deliveryStatusPill').classList.toggle('failed', deck?.status === 'failed');
+  $('#deliveryStatusPill').classList.toggle('ready', deck?.status === 'complete');
+  $('#deliveryResult').classList.toggle('hidden', deck?.status !== 'complete');
+  $('#deliveryFailure').classList.toggle('hidden', deck?.status !== 'failed');
+  $('#deliveryFailureText').textContent = deck?.error || 'Please retry in a moment.';
+  renderWorkingSteps(deck);
+
+  if (deck?.status === 'complete') {
+    stopDeliveryTimers();
+    loadDecks();
+    return;
+  }
+
+  if (deck?.status === 'failed') {
+    stopDeliveryTimers();
+    return;
+  }
+}
+
+async function pollDelivery(deckId) {
+  try {
+    const { deck } = await api(`/api/decks/${deckId}`);
+    renderDelivery(deck);
+  } catch (error) {
+    reportIssue(error.message || 'Could not refresh generation status.', 'Delivery', { deckId });
+  }
+}
+
+function openDelivery(deck, replace = false) {
+  state.deliveryStartedAt = Date.parse(deck.createdAt || '') || Date.now();
+  state.deliveryDownloadStarted = false;
+  renderDelivery(deck);
+  setRailActive('');
+  show('deliveryView');
+  const url = `#/deliver/${deck.id}`;
+  if (replace) history.replaceState({ deckId: deck.id }, '', url);
+  else history.pushState({ deckId: deck.id }, '', url);
+  stopDeliveryTimers();
+  state.deliveryElapsedTimer = setInterval(updateDeliveryElapsed, 1000);
+  state.deliveryPollTimer = setInterval(() => pollDelivery(deck.id), 2200);
+  updateDeliveryElapsed();
+  pollDelivery(deck.id);
 }
 
 function addMessage(role, text) {
@@ -261,7 +424,7 @@ function addMessage(role, text) {
 function renderMessages(deck) {
   $('#chatLog').innerHTML = '';
   const messages = deck.messages?.length
-    ? deck.messages
+    ? deck.messages.filter((message) => message.role !== 'progress')
     : [
         { role: 'user', text: deck.prompt },
         { role: 'assistant', text: `Ready to edit ${deck.title || 'this deck'}.` }
@@ -331,14 +494,15 @@ async function generateDeck() {
     selectTemplate(state.templates[0].id);
   }
   setGenerateState(true);
-  toast('Generating real HTML slides...');
+  toast('Opening the working page...');
   try {
-    const { deck } = await api('/api/generate', {
+    const { deck, user, quota } = await api('/api/generate', {
       method: 'POST',
-      body: { prompt: userPrompt, templateId: state.selectedTemplateId }
+      body: { prompt: userPrompt, templateId: state.selectedTemplateId, async: true }
     });
-    $('#generationStatus').classList.add('hidden');
-    openWorkspace(deck);
+    if (user) setUser(user);
+    setQuota(quota);
+    openDelivery(deck);
     await loadDecks();
   } catch (error) {
     const failedDeck = error.data?.deck || null;
@@ -349,14 +513,16 @@ async function generateDeck() {
   }
 }
 
-async function retryGeneration(deckId) {
+async function retryGeneration(deckId, useDelivery = false) {
   if (!deckId || state.isGenerating) return;
   setGenerateState(true);
   toast('Retrying generation...');
   try {
-    const { deck } = await api(`/api/generate/${deckId}/retry`, { method: 'POST' });
+    const { deck, quota } = await api(`/api/generate/${deckId}/retry`, { method: 'POST', body: { async: useDelivery } });
+    setQuota(quota);
     $('#generationStatus').classList.add('hidden');
-    openWorkspace(deck);
+    if (useDelivery) openDelivery(deck);
+    else openWorkspace(deck);
     await loadDecks();
   } catch (error) {
     const failedDeck = error.data?.deck || { id: deckId };
@@ -368,7 +534,9 @@ async function retryGeneration(deckId) {
 }
 
 function openWorkspace(deck) {
+  stopDeliveryTimers();
   state.activeDeck = deck;
+  $('#workspaceView').classList.remove('preview-closed');
   const template = state.templates.find((item) => item.id === deck.templateId);
   $('#deckTitle').textContent = deck.title;
   $('#deckMeta').textContent = `${template?.name || 'Template'} · ${deck.status || 'complete'} · HTML Slides`;
@@ -379,6 +547,7 @@ function openWorkspace(deck) {
   updatePageIndicator(deck.currentPage || 1, 1);
   clientLog('info', 'Workspace opened', { deckId: deck.id, templateId: deck.templateId });
   show('workspaceView');
+  history.pushState({ deckId: deck.id }, '', `#/deck/${deck.id}`);
 }
 
 async function openDeckById(deckId) {
@@ -387,6 +556,32 @@ async function openDeckById(deckId) {
     openWorkspace(deck);
   } catch (error) {
     reportIssue(error.message || 'Could not open deck.', 'Deck history', { deckId });
+  }
+}
+
+async function openDeliveryById(deckId, replace = false) {
+  try {
+    const { deck } = await api(`/api/decks/${deckId}`);
+    openDelivery(deck, replace);
+  } catch (error) {
+    reportIssue(error.message || 'Could not open generation page.', 'Delivery', { deckId });
+  }
+}
+
+function routeFromHash() {
+  const [, route, id] = window.location.hash.match(/^#\/([^/]+)\/([^/]+)/) || [];
+  return { route, id };
+}
+
+async function restoreRoute() {
+  if (!state.user) return;
+  const { route, id } = routeFromHash();
+  if (route === 'deliver' && id) {
+    await openDeliveryById(id, true);
+    return;
+  }
+  if (route === 'deck' && id) {
+    await openDeckById(id);
   }
 }
 
@@ -655,12 +850,19 @@ async function init() {
   $('#authForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     $('#authError').textContent = '';
+    $('#verificationLink').classList.add('hidden');
     try {
-      const { user } = await api('/api/login', {
+      const { user, verificationLink } = await api('/api/login', {
         method: 'POST',
         body: { email: $('#emailInput').value, password: $('#passwordInput').value }
       });
       setUser(user);
+      if (verificationLink) {
+        state.verificationLink = verificationLink;
+        $('#verificationLink').innerHTML = `Verification email link for this MVP: <a href="${verificationLink}" target="_blank" rel="noreferrer">verify email</a>`;
+        $('#verificationLink').classList.remove('hidden');
+        toast('Verify your email to receive credits.');
+      }
     } catch (error) {
       $('#authError').textContent = error.message;
       reportIssue(error.message, 'Login');
@@ -669,12 +871,19 @@ async function init() {
 
   $('#signupBtn').addEventListener('click', async () => {
     $('#authError').textContent = '';
+    $('#verificationLink').classList.add('hidden');
     try {
-      const { user } = await api('/api/signup', {
+      const { user, verificationLink } = await api('/api/signup', {
         method: 'POST',
         body: { name: $('#nameInput').value, email: $('#emailInput').value, password: $('#passwordInput').value }
       });
       setUser(user);
+      if (verificationLink) {
+        state.verificationLink = verificationLink;
+        $('#verificationLink').innerHTML = `Verification email link for this MVP: <a href="${verificationLink}" target="_blank" rel="noreferrer">verify email</a>`;
+        $('#verificationLink').classList.remove('hidden');
+        toast('Account created. Verify your email to receive credits.');
+      }
     } catch (error) {
       $('#authError').textContent = error.message;
       reportIssue(error.message, 'Signup');
@@ -682,6 +891,10 @@ async function init() {
   });
 
   $('#logoutBtn').addEventListener('click', async () => {
+    if (!state.user || state.user.isGuest) {
+      show('authView');
+      return;
+    }
     try {
       await api('/api/logout', { method: 'POST' });
       setUser(null);
@@ -691,58 +904,65 @@ async function init() {
     }
   });
 
-  $('#modelBtn').addEventListener('click', () => $('#modelDialog').showModal());
   $('#userButton').addEventListener('click', () => {
-    if (state.user) {
-      $('#modelDialog').showModal();
+    if (state.user && !state.user.isGuest) {
+      toast(`${state.user.name} is signed in.`);
     } else {
       show('authView');
     }
   });
-  $('#closeModelBtn').addEventListener('click', () => $('#modelDialog').close());
-  $('#modelForm').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    try {
-      const { user } = await api('/api/model-config', {
-        method: 'POST',
-        body: {
-          provider: $('#providerInput').value,
-          baseUrl: $('#baseUrlInput').value,
-          model: $('#modelInput').value,
-          apiKey: $('#apiKeyInput').value,
-          output: $('#outputInput').value
-        }
-      });
-      setUser(user);
-      $('#modelDialog').close();
-      toast('Model settings saved.');
-    } catch (error) {
-      reportIssue(error.message || 'Could not save model settings.', 'Model settings');
+
+  $('#settingsButton').addEventListener('click', () => {
+    if (state.user && !state.user.isGuest) {
+      toast(`Signed in as ${state.user.email || state.user.name}.`);
+    } else {
+      show('authView');
     }
   });
 
-  document.querySelectorAll('.rail-button').forEach((button) => {
+  let suppressSidebarPeek = false;
+  $('#sidebarToggle').addEventListener('mouseenter', () => {
+    if (!document.body.classList.contains('sidebar-pinned') && !suppressSidebarPeek) {
+      document.body.classList.add('sidebar-peek');
+    }
+  });
+  $('#sidebarToggle').addEventListener('mouseleave', () => {
+    suppressSidebarPeek = false;
+    if (!document.body.classList.contains('sidebar-pinned')) {
+      setTimeout(() => {
+        if (!$('#sidebar')?.matches(':hover')) document.body.classList.remove('sidebar-peek');
+      }, 90);
+    }
+  });
+  $('#sidebar').addEventListener('mouseenter', () => {
+    if (!document.body.classList.contains('sidebar-pinned')) document.body.classList.add('sidebar-peek');
+  });
+  $('#sidebar').addEventListener('mouseleave', () => {
+    if (!document.body.classList.contains('sidebar-pinned')) document.body.classList.remove('sidebar-peek');
+  });
+  $('#sidebarToggle').addEventListener('click', () => {
+    const pinned = document.body.classList.toggle('sidebar-pinned');
+    if (!pinned) {
+      suppressSidebarPeek = true;
+      document.body.classList.remove('sidebar-peek');
+    }
+    $('#sidebarToggle').setAttribute('aria-expanded', String(pinned));
+  });
+
+  document.querySelectorAll('.sidebar-action[data-rail-action]').forEach((button) => {
     button.addEventListener('click', () => {
       const action = button.dataset.railAction;
       setRailActive(action);
       if (action === 'home') {
+        document.body.classList.remove('sidebar-pinned');
+        document.body.classList.remove('sidebar-peek');
+        $('#sidebarToggle').setAttribute('aria-expanded', 'false');
         show(state.user ? 'homeView' : 'authView');
         return;
       }
       if (action === 'templates') {
         show(state.user ? 'homeView' : 'authView');
         document.querySelector('.templates-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        toast('Template library is visible below.');
-        return;
-      }
-      if (action === 'settings') {
-        if (state.user) $('#modelDialog').showModal();
-        else toast('Log in to edit model settings.');
-        return;
-      }
-      if (action === 'history') {
-        if (state.recentDecks[0]) openDeckById(state.recentDecks[0].id);
-        else toast('No generated decks yet.');
         return;
       }
       toast('This section is queued for the next milestone.');
@@ -794,10 +1014,27 @@ async function init() {
   $('#promptInput').addEventListener('input', () => {
     $('#generateBtn').classList.toggle('ready', Boolean($('#promptInput').value.trim()));
   });
-  $('#backHomeBtn').addEventListener('click', () => {
+  $('#deliveryBackBtn').addEventListener('click', () => {
+    stopDeliveryTimers();
     setRailActive('home');
     show('homeView');
+    history.pushState({}, '', '#/');
     loadDecks();
+  });
+  $('#deliveryPdfBtn').addEventListener('click', () => {
+    if (!state.deliveryDeck) return;
+    openDownload(`/api/decks/${state.deliveryDeck.id}/export/pdf`);
+    toast('Preparing PDF export.');
+  });
+  $('#deliveryHtmlBtn').addEventListener('click', () => {
+    if (!state.deliveryDeck) return;
+    openDownload(`/api/decks/${state.deliveryDeck.id}/download/html`);
+  });
+  $('#deliveryOpenDeckBtn').addEventListener('click', () => {
+    if (state.deliveryDeck) openWorkspace(state.deliveryDeck);
+  });
+  $('#deliveryRetryBtn').addEventListener('click', () => {
+    if (state.deliveryDeck) retryGeneration(state.deliveryDeck.id, true);
   });
   $('#annotateBtn').addEventListener('click', () => {
     toggleAnnotate();
@@ -810,6 +1047,13 @@ async function init() {
     clearInterval(syncPreviewPage.timer);
     syncPreviewPage.timer = setInterval(syncPreviewPage, 800);
   });
+  $('#closePreviewBtn').addEventListener('click', () => {
+    state.annotate = false;
+    $('#annotationLayer').classList.add('hidden');
+    $('#annotateBtn').classList.remove('active');
+    $('#annotationPanel').classList.add('hidden');
+    $('#workspaceView').classList.add('preview-closed');
+  });
   $('#fullscreenFrame').addEventListener('load', () => {
     showFrameSlide($('#fullscreenFrame'), state.currentPage);
     clearInterval(syncFramePage.fullscreenTimer);
@@ -817,11 +1061,10 @@ async function init() {
       if (!$('#fullscreenView').classList.contains('hidden')) syncFramePage($('#fullscreenFrame'));
     }, 500);
   });
-  $('#refreshDecksBtn').addEventListener('click', loadDecks);
   $('#refreshHomeDecksBtn').addEventListener('click', loadDecks);
   $('#regenerateBtn').addEventListener('click', () => {
     if (!state.activeDeck) return;
-    retryGeneration(state.activeDeck.id);
+    retryGeneration(state.activeDeck.id, true);
   });
   $('#undoBtn').addEventListener('click', undoDeck);
   $('#closeAnnotationPanelBtn').addEventListener('click', () => {
@@ -899,13 +1142,16 @@ async function init() {
     clientLog('info', 'Fullscreen chat submitted', { deckId: state.activeDeck?.id });
   });
 
-  const [{ user }, templateData] = await Promise.all([
+  const [{ user, quota }, templateData] = await Promise.all([
     api('/api/me'),
     api('/api/templates')
   ]);
   state.templates = templateData.templates;
   renderTemplates();
+  setQuota(quota);
   setUser(user);
+  await restoreRoute();
+  window.addEventListener('popstate', restoreRoute);
 }
 
 init().catch((error) => {

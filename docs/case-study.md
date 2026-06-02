@@ -104,7 +104,6 @@ Core tables:
 
 - `users`
 - `sessions`
-- `model_configs`
 - `decks`
 - `deck_messages`
 - `deck_comments`
@@ -128,9 +127,9 @@ Mitigation: Require a persistent disk mounted at `SLIDE_STUDIO_DATA_DIR`.
 
 ### API Key Handling
 
-Risk: User-provided API keys are stored locally in the MVP.
+Risk: A shared server-side model key can create uncontrolled usage if the public app is abused.
 
-Mitigation: Make this explicit in the UI and docs. For production, move to encrypted secret storage.
+Mitigation: Keep the key in deployment secrets, avoid exposing it to users, and add rate limits plus usage monitoring before public launch.
 
 ## Next Steps
 
