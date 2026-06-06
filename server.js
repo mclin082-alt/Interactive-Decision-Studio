@@ -110,6 +110,16 @@ function ensureDb() {
       used_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS signup_verification_tokens (
+      token TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      name TEXT,
+      pending_guest_user_id TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -222,7 +232,8 @@ function normalizeDbShape(db = {}) {
     decks: Array.isArray(db.decks) ? db.decks : [],
     logs: Array.isArray(db.logs) ? db.logs : [],
     usageEvents: Array.isArray(db.usageEvents) ? db.usageEvents : [],
-    verificationTokens: Array.isArray(db.verificationTokens) ? db.verificationTokens : []
+    verificationTokens: Array.isArray(db.verificationTokens) ? db.verificationTokens : [],
+    signupVerificationTokens: Array.isArray(db.signupVerificationTokens) ? db.signupVerificationTokens : []
   };
 }
 
@@ -319,7 +330,16 @@ function readDb() {
     expiresAt: row.expires_at,
     usedAt: row.used_at || ''
   }));
-  return { users, sessions, decks, logs, usageEvents, verificationTokens };
+  const signupVerificationTokens = db.prepare('SELECT * FROM signup_verification_tokens ORDER BY datetime(created_at) DESC').all().map((row) => ({
+    token: row.token,
+    email: row.email,
+    name: row.name || '',
+    pendingGuestUserId: row.pending_guest_user_id || '',
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    usedAt: row.used_at || ''
+  }));
+  return { users, sessions, decks, logs, usageEvents, verificationTokens, signupVerificationTokens };
 }
 
 function writeDb(db) {
@@ -332,6 +352,7 @@ function writeDb(db) {
       DELETE FROM logs;
       DELETE FROM usage_events;
       DELETE FROM email_verification_tokens;
+      DELETE FROM signup_verification_tokens;
       DELETE FROM template_selections;
       DELETE FROM deck_versions;
       DELETE FROM deck_comments;
@@ -361,6 +382,9 @@ function writeDb(db) {
     const insertVerificationToken = sqlite.prepare(`INSERT INTO email_verification_tokens (
       token, user_id, created_at, expires_at, used_at, pending_guest_user_id
     ) VALUES (?, ?, ?, ?, ?, ?)`);
+    const insertSignupVerificationToken = sqlite.prepare(`INSERT INTO signup_verification_tokens (
+      token, email, name, pending_guest_user_id, created_at, expires_at, used_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`);
 
     for (const user of data.users) {
       insertUser.run(
@@ -457,6 +481,17 @@ function writeDb(db) {
           entry.pendingGuestUserId || ''
         );
       }
+    }
+    for (const entry of data.signupVerificationTokens) {
+      insertSignupVerificationToken.run(
+        entry.token,
+        entry.email,
+        entry.name || '',
+        entry.pendingGuestUserId || '',
+        entry.createdAt || new Date().toISOString(),
+        entry.expiresAt || new Date().toISOString(),
+        entry.usedAt || ''
+      );
     }
     sqlite.exec('COMMIT');
   } catch (error) {
@@ -699,6 +734,22 @@ function createEmailVerification(db, user, options = {}) {
     usedAt: ''
   });
   return `${APP_BASE_URL}/api/verify-email?token=${token}`;
+}
+
+function createSignupVerification(db, { email, name, pendingGuestUserId = '' }) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 3).toISOString();
+  db.signupVerificationTokens.unshift({
+    token,
+    email,
+    name,
+    pendingGuestUserId,
+    createdAt: now.toISOString(),
+    expiresAt,
+    usedAt: ''
+  });
+  return `${APP_BASE_URL}/?signup_token=${encodeURIComponent(token)}`;
 }
 
 function mergeGuestProjectsIntoUser(db, guestUserId, user) {
@@ -2154,37 +2205,71 @@ function createApiRouter() {
     const pendingGuestUserId = currentUser?.isGuest ? currentUser.id : '';
     const email = String(req.body.email || '').trim().toLowerCase();
     const name = String(req.body.name || '').trim() || email.split('@')[0];
-    const password = String(req.body.password || '');
-    if (!email || password.length < 6) return res.status(400).json({ error: 'Email and 6+ character password required.' });
+    if (!email) return res.status(400).json({ error: 'Email is required.' });
     if (db.users.some((item) => item.email === email)) return res.status(409).json({ error: 'Email already exists.' });
 
+    for (const entry of db.signupVerificationTokens || []) {
+      if (entry.email === email && !entry.usedAt) entry.usedAt = new Date().toISOString();
+    }
+    const verificationLink = createSignupVerification(db, { email, name, pendingGuestUserId });
+    writeDb(db);
+    const verificationEmail = await sendVerificationEmail({ email }, verificationLink).catch((error) => {
+      logEvent('error', 'Verification email delivery failed', { email, message: error.message });
+      return createVerificationEmailPreview({ email }, verificationLink);
+    });
+    logEvent('info', 'Signup verification link created', { email, verificationLink, delivery: verificationEmail.delivery, pendingGuestUserId });
+    res.json({
+      requiresVerification: true,
+      verificationLink,
+      verificationEmail
+    });
+  });
+
+  router.get('/signup-token', (req, res) => {
+    const db = readDb();
+    const token = String(req.query.token || '').trim();
+    const entry = (db.signupVerificationTokens || []).find((item) => item.token === token);
+    if (!entry || entry.usedAt) return res.status(400).json({ error: 'Signup verification link is invalid or already used.' });
+    if (new Date(entry.expiresAt).getTime() < Date.now()) return res.status(400).json({ error: 'Signup verification link has expired.' });
+    if (db.users.some((item) => item.email === entry.email)) return res.status(409).json({ error: 'Email already exists. Please log in.' });
+    res.json({ email: entry.email, name: entry.name || entry.email.split('@')[0] });
+  });
+
+  router.post('/signup/complete', (req, res) => {
+    const db = readDb();
+    const token = String(req.body.token || '').trim();
+    const password = String(req.body.password || '');
+    const name = String(req.body.name || '').trim();
+    const entry = (db.signupVerificationTokens || []).find((item) => item.token === token);
+    if (!entry || entry.usedAt) return res.status(400).json({ error: 'Signup verification link is invalid or already used.' });
+    if (new Date(entry.expiresAt).getTime() < Date.now()) return res.status(400).json({ error: 'Signup verification link has expired.' });
+    if (password.length < 6) return res.status(400).json({ error: 'A 6+ character password is required.' });
+    if (db.users.some((item) => item.email === entry.email)) return res.status(409).json({ error: 'Email already exists. Please log in.' });
+
+    const now = new Date().toISOString();
     const newUser = {
       id: crypto.randomUUID(),
-      name,
-      email,
+      name: name || entry.name || entry.email.split('@')[0],
+      email: entry.email,
       passwordHash: hashPassword(password),
-      createdAt: new Date().toISOString(),
-      emailVerifiedAt: '',
-      credits: 0,
+      createdAt: now,
+      emailVerifiedAt: now,
+      credits: QUOTAS.verifiedSignupCredits,
       plan: 'free',
       isGuest: false
     };
     db.users.push(newUser);
-    const verificationLink = createEmailVerification(db, newUser, { pendingGuestUserId });
-    const token = crypto.randomBytes(32).toString('hex');
-    db.sessions[token] = { userId: newUser.id, createdAt: new Date().toISOString() };
+    entry.usedAt = now;
+    const migration = mergeGuestProjectsIntoUser(db, entry.pendingGuestUserId, newUser);
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    db.sessions[sessionToken] = { userId: newUser.id, createdAt: now };
     writeDb(db);
-    setSessionCookie(res, token);
-    const verificationEmail = await sendVerificationEmail(newUser, verificationLink).catch((error) => {
-      logEvent('error', 'Verification email delivery failed', { email, message: error.message });
-      return createVerificationEmailPreview(newUser, verificationLink);
-    });
-    logEvent('info', 'User signed up; email verification link created', { email, verificationLink, delivery: verificationEmail.delivery, pendingGuestUserId });
+    setSessionCookie(res, sessionToken);
+    logEvent('info', 'Signup completed after email verification', { email: newUser.email, migratedDecks: migration.decks });
     res.json({
       user: publicUser(newUser),
-      requiresVerification: true,
-      verificationLink,
-      verificationEmail
+      quota: usageSummaryForUser(db, newUser, req),
+      migratedDecks: migration.decks
     });
   });
 

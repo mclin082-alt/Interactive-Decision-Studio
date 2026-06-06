@@ -19,7 +19,9 @@ const state = {
   errors: [],
   quota: null,
   verificationLink: '',
-  verificationEmail: null
+  verificationEmail: null,
+  pendingSignupToken: '',
+  pendingSignupEmail: ''
 };
 
 const artifactTypes = [
@@ -735,6 +737,42 @@ function handleVerificationReturn() {
   history.replaceState(history.state, '', `${window.location.pathname}${window.location.hash}`);
 }
 
+function enterSignupCompletion({ token, email, name }) {
+  state.pendingSignupToken = token;
+  state.pendingSignupEmail = email;
+  show('authView');
+  $('#emailInput').value = email || '';
+  $('#nameInput').value = name || '';
+  $('#passwordInput').value = '';
+  $('#passwordInput').focus();
+  $('#signupBtn').textContent = 'Finish account';
+  $('#verificationLink').innerHTML = `Email verified for ${escapeHtml(email)}. Set a password to finish creating your account.`;
+  $('#verificationLink').classList.remove('hidden');
+  toast('Email verified. Set a password to finish signup.');
+}
+
+function resetSignupCompletion() {
+  state.pendingSignupToken = '';
+  state.pendingSignupEmail = '';
+  $('#signupBtn').textContent = 'Create account';
+}
+
+async function handleSignupVerificationReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('signup_token');
+  if (!token) return;
+  try {
+    const payload = await api(`/api/signup-token?token=${encodeURIComponent(token)}`);
+    enterSignupCompletion({ token, ...payload });
+    history.replaceState(history.state, '', `${window.location.pathname}${window.location.hash}`);
+  } catch (error) {
+    show('authView');
+    $('#verificationLink').innerHTML = escapeHtml(error.message || 'Signup verification link could not be used.');
+    $('#verificationLink').classList.remove('hidden');
+    reportIssue(error.message || 'Signup verification link could not be used.', 'Signup');
+  }
+}
+
 function syncPreviewPage() {
   const frame = $('#slideFrame');
   if (!frame?.contentDocument) return;
@@ -999,6 +1037,7 @@ async function init() {
 
   $('#authForm').addEventListener('submit', async (event) => {
     event.preventDefault();
+    resetSignupCompletion();
     $('#authError').textContent = '';
     $('#verificationLink').classList.add('hidden');
     try {
@@ -1026,17 +1065,34 @@ async function init() {
     $('#authError').textContent = '';
     $('#verificationLink').classList.add('hidden');
     try {
+      if (state.pendingSignupToken) {
+        const payload = await api('/api/signup/complete', {
+          method: 'POST',
+          body: {
+            token: state.pendingSignupToken,
+            name: $('#nameInput').value,
+            password: $('#passwordInput').value
+          }
+        });
+        resetSignupCompletion();
+        setUser(payload.user);
+        setQuota(payload.quota);
+        await loadDecks();
+        toast(payload.migratedDecks
+          ? `Account created. ${payload.migratedDecks} trial project${payload.migratedDecks === 1 ? '' : 's'} saved.`
+          : 'Account created. You are signed in.');
+        return;
+      }
+
       const payload = await api('/api/signup', {
         method: 'POST',
-        body: { name: $('#nameInput').value, email: $('#emailInput').value, password: $('#passwordInput').value }
+        body: { name: $('#nameInput').value, email: $('#emailInput').value }
       });
-      const { user, verificationLink } = payload;
-      setUser(user);
-      if (verificationLink) {
+      if (payload.verificationLink) {
         rememberVerificationPayload(payload);
-        $('#verificationLink').innerHTML = `Verification email sent. Open Gmail, click the confirmation button, then return here.`;
+        $('#verificationLink').innerHTML = `Verification email sent. Open your inbox, click the confirmation link, then set your password here.`;
         $('#verificationLink').classList.remove('hidden');
-        toast('Account created. Open Gmail to receive credits.');
+        toast('Check your email to verify before creating the account.');
       }
     } catch (error) {
       $('#authError').textContent = error.message;
@@ -1311,6 +1367,7 @@ async function init() {
   setQuota(quota);
   setUser(user);
   handleVerificationReturn();
+  await handleSignupVerificationReturn();
   await restoreRoute();
   window.addEventListener('popstate', restoreRoute);
 }
