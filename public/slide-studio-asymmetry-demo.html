@@ -1,0 +1,1819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slide Studio Asymmetry Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&family=Fraunces:opsz,wght@9..144,700;9..144,900&family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /* === THEME === */
+        :root {
+            --stage-bg: #0b0e10;
+            --slide-bg: #101410;
+            --ink: #f4f1e7;
+            --muted: #9ba39a;
+            --dim: #677066;
+            --line: rgba(244, 241, 231, 0.16);
+            --panel: rgba(244, 241, 231, 0.065);
+            --panel-strong: rgba(244, 241, 231, 0.12);
+            --mint: #9af0c1;
+            --lime: #d7ff6b;
+            --amber: #ffbc58;
+            --coral: #ff6d58;
+            --blue: #76b7ff;
+            --violet: #b796ff;
+            --shadow: rgba(0, 0, 0, 0.42);
+            --display: "Fraunces", serif;
+            --body: "DM Sans", sans-serif;
+            --mono: "IBM Plex Mono", monospace;
+            --ease: cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        /* === RESET === */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        button,
+        input {
+            font: inherit;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        /* ===========================================
+           FIXED 16:9 STAGE: MANDATORY BASE STYLES
+           Include this ENTIRE file in every presentation.
+           Slides are authored at 1920×1080 and scaled as a whole.
+           =========================================== */
+
+        /* 1. Lock the browser viewport */
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: var(--stage-bg, #000);
+        }
+
+        /* 2. Full-window deck viewport */
+        .deck-viewport {
+            position: fixed;
+            inset: 0;
+            overflow: hidden;
+            background: var(--stage-bg, #000);
+        }
+
+        /* 3. Fixed 16:9 design canvas.
+           JavaScript sets transform: translate(...) scale(...). */
+        .deck-stage {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 1920px;
+            height: 1080px;
+            overflow: hidden;
+            transform-origin: 0 0;
+            background: var(--slide-bg, #fff);
+        }
+
+        /* 4. Slides stack inside the fixed stage.
+           Content must be laid out at 1920×1080, not reflowed per device. */
+        .slide {
+            position: absolute;
+            inset: 0;
+            width: 1920px;
+            height: 1080px;
+            overflow: hidden;
+            display: block;
+            visibility: hidden;
+            opacity: 0;
+            pointer-events: none;
+            background: var(--slide-bg, #fff);
+        }
+
+        .slide.active,
+        .slide.visible {
+            visibility: visible;
+            opacity: 1;
+            pointer-events: auto;
+            z-index: 1;
+        }
+
+        /* 5. Keep media inside authored slide bounds */
+        img,
+        video,
+        canvas,
+        svg {
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        /* 6. Presentation chrome stays outside the slide design system */
+        .deck-controls {
+            position: fixed;
+            left: 50%;
+            bottom: 22px;
+            transform: translateX(-50%);
+            z-index: 1000;
+        }
+
+        /* 7. Print one fixed-size slide per page */
+        @media print {
+            html,
+            body {
+                width: 1920px;
+                height: auto;
+                overflow: visible;
+                background: #fff;
+            }
+
+            .deck-viewport {
+                position: static;
+                overflow: visible;
+                background: #fff;
+            }
+
+            .deck-stage {
+                position: static;
+                width: auto;
+                height: auto;
+                transform: none !important;
+                background: none;
+            }
+
+            .slide {
+                position: relative;
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                width: 1920px;
+                height: 1080px;
+                break-after: page;
+                page-break-after: always;
+            }
+
+            .slide:last-child {
+                break-after: auto;
+                page-break-after: auto;
+            }
+
+            .deck-controls {
+                display: none !important;
+            }
+        }
+
+        /* 8. Reduced motion */
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                transition-duration: 0.2s !important;
+            }
+        }
+
+        /* === SHARED SLIDE SYSTEM === */
+        .slide {
+            color: var(--ink);
+            font-family: var(--body);
+            background:
+                radial-gradient(circle at 16% 18%, rgba(154, 240, 193, 0.14), transparent 30%),
+                radial-gradient(circle at 78% 12%, rgba(118, 183, 255, 0.12), transparent 25%),
+                linear-gradient(135deg, #121611 0%, #0d1212 62%, #15120d 100%);
+        }
+
+        .slide::before {
+            position: absolute;
+            inset: 0;
+            content: "";
+            background-image:
+                linear-gradient(rgba(244, 241, 231, 0.045) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(244, 241, 231, 0.035) 1px, transparent 1px);
+            background-size: 48px 48px;
+            mask-image: linear-gradient(120deg, rgba(0, 0, 0, 0.85), transparent 78%);
+            pointer-events: none;
+        }
+
+        .slide::after {
+            position: absolute;
+            inset: 34px;
+            content: "";
+            border: 1px solid rgba(244, 241, 231, 0.12);
+            pointer-events: none;
+        }
+
+        .content {
+            position: relative;
+            z-index: 2;
+            display: grid;
+            gap: 34px;
+            width: 100%;
+            height: 100%;
+            padding: 78px 88px;
+        }
+
+        .eyebrow {
+            color: var(--mint);
+            font-family: var(--mono);
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+
+        h1,
+        h2 {
+            font-family: var(--display);
+            font-weight: 900;
+            letter-spacing: 0;
+        }
+
+        h1 {
+            max-width: 1220px;
+            font-size: 128px;
+            line-height: 0.94;
+        }
+
+        h2 {
+            max-width: 1180px;
+            font-size: 86px;
+            line-height: 0.98;
+        }
+
+        .lead {
+            max-width: 980px;
+            color: rgba(244, 241, 231, 0.8);
+            font-size: 34px;
+            line-height: 1.28;
+            font-weight: 500;
+        }
+
+        .caption {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 18px;
+            line-height: 1.45;
+        }
+
+        .reveal {
+            opacity: 0;
+            transform: translateY(34px);
+            transition:
+                opacity 700ms var(--ease),
+                transform 700ms var(--ease);
+        }
+
+        .visible .reveal {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .visible .reveal:nth-child(2) { transition-delay: 80ms; }
+        .visible .reveal:nth-child(3) { transition-delay: 160ms; }
+        .visible .reveal:nth-child(4) { transition-delay: 240ms; }
+        .visible .reveal:nth-child(5) { transition-delay: 320ms; }
+
+        .chip {
+            display: inline-grid;
+            place-items: center;
+            min-height: 46px;
+            padding: 0 18px;
+            color: var(--ink);
+            background: var(--lime);
+            border-radius: 999px;
+            font-family: var(--mono);
+            font-size: 18px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .panel {
+            border: 1px solid var(--line);
+            background: var(--panel);
+            box-shadow: 0 28px 70px var(--shadow);
+            backdrop-filter: blur(16px);
+        }
+
+        .metric {
+            display: grid;
+            gap: 10px;
+            padding: 24px;
+            border: 1px solid var(--line);
+            background: rgba(0, 0, 0, 0.18);
+        }
+
+        .metric strong {
+            color: var(--lime);
+            font-family: var(--display);
+            font-size: 66px;
+            line-height: 0.92;
+        }
+
+        .metric span {
+            color: var(--muted);
+            font-size: 21px;
+            line-height: 1.25;
+        }
+
+        .nav-hint {
+            position: absolute;
+            right: 88px;
+            bottom: 66px;
+            z-index: 4;
+            color: var(--dim);
+            font-family: var(--mono);
+            font-size: 17px;
+        }
+
+        /* === TITLE SLIDE === */
+        .title-layout {
+            grid-template-rows: auto 1fr auto;
+        }
+
+        .title-grid {
+            display: grid;
+            grid-template-columns: 1fr 510px;
+            align-items: end;
+            gap: 70px;
+        }
+
+        .title-orbit {
+            position: relative;
+            width: 510px;
+            height: 510px;
+            border: 1px solid var(--line);
+            border-radius: 50%;
+            background:
+                radial-gradient(circle, rgba(215, 255, 107, 0.14), transparent 54%),
+                rgba(244, 241, 231, 0.04);
+        }
+
+        .title-orbit span {
+            position: absolute;
+            display: grid;
+            place-items: center;
+            width: 168px;
+            height: 168px;
+            border: 1px solid var(--line);
+            border-radius: 50%;
+            color: var(--ink);
+            background: #111610;
+            font-family: var(--mono);
+            font-size: 19px;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .title-orbit span:nth-child(1) { left: 50%; top: -54px; translate: -50% 0; color: #111; background: var(--mint); }
+        .title-orbit span:nth-child(2) { right: -48px; top: 50%; translate: 0 -50%; background: rgba(118, 183, 255, 0.24); }
+        .title-orbit span:nth-child(3) { left: 50%; bottom: -54px; translate: -50% 0; background: rgba(255, 188, 88, 0.24); }
+        .title-orbit span:nth-child(4) { left: -48px; top: 50%; translate: 0 -50%; background: rgba(255, 109, 88, 0.24); }
+
+        .orbit-core {
+            position: absolute;
+            inset: 156px;
+            display: grid;
+            place-items: center;
+            border-radius: 50%;
+            color: #101410;
+            background: var(--lime);
+            font-family: var(--display);
+            font-size: 34px;
+            font-weight: 900;
+            text-align: center;
+        }
+
+        .title-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid var(--line);
+            padding-top: 24px;
+        }
+
+        /* === COMPETITIVE MAP === */
+        .map-layout {
+            grid-template-columns: 620px 1fr;
+            align-items: center;
+        }
+
+        .axis-map {
+            position: relative;
+            height: 760px;
+            padding: 48px;
+        }
+
+        .axis-map::before,
+        .axis-map::after {
+            position: absolute;
+            content: "";
+            background: rgba(244, 241, 231, 0.18);
+        }
+
+        .axis-map::before {
+            left: 50%;
+            top: 52px;
+            bottom: 78px;
+            width: 2px;
+        }
+
+        .axis-map::after {
+            left: 54px;
+            right: 74px;
+            top: 50%;
+            height: 2px;
+        }
+
+        .axis-label {
+            position: absolute;
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 17px;
+        }
+
+        .axis-label.top { top: 24px; left: 50%; translate: -50% 0; }
+        .axis-label.bottom { bottom: 24px; left: 50%; translate: -50% 0; }
+        .axis-label.left { left: 22px; top: 50%; translate: 0 -50%; writing-mode: vertical-rl; rotate: 180deg; }
+        .axis-label.right { right: 22px; top: 50%; translate: 0 -50%; writing-mode: vertical-rl; }
+
+        .dot {
+            position: absolute;
+            display: grid;
+            gap: 4px;
+            min-width: 146px;
+            padding: 12px 14px;
+            border: 1px solid var(--line);
+            background: rgba(0, 0, 0, 0.36);
+            font-family: var(--mono);
+            font-size: 15px;
+        }
+
+        .dot b {
+            color: var(--ink);
+            font-size: 18px;
+        }
+
+        .dot small {
+            color: var(--muted);
+        }
+
+        .dot.powerpoint { left: 110px; bottom: 130px; }
+        .dot.canva { left: 158px; top: 172px; }
+        .dot.gamma { right: 168px; top: 222px; }
+        .dot.chatgpt { right: 130px; bottom: 178px; }
+        .dot.coders { right: 86px; bottom: 86px; }
+        .dot.studio {
+            right: 78px;
+            top: 86px;
+            color: #101410;
+            background: var(--lime);
+            box-shadow: 0 0 40px rgba(215, 255, 107, 0.22);
+        }
+        .dot.studio small,
+        .dot.studio b { color: #101410; }
+
+        .map-cards {
+            display: grid;
+            gap: 18px;
+        }
+
+        .map-card {
+            display: grid;
+            grid-template-columns: 230px 1fr;
+            gap: 28px;
+            padding: 30px;
+        }
+
+        .map-card b {
+            color: var(--mint);
+            font-family: var(--mono);
+            font-size: 19px;
+            text-transform: uppercase;
+        }
+
+        .map-card p {
+            color: rgba(244, 241, 231, 0.82);
+            font-size: 27px;
+            line-height: 1.24;
+        }
+
+        /* === FRAGMENTED WORKFLOW === */
+        .workflow-stack {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 16px;
+            align-items: end;
+            height: 480px;
+            margin-top: 34px;
+        }
+
+        .tool-card {
+            position: relative;
+            display: grid;
+            align-content: space-between;
+            min-height: 290px;
+            padding: 22px;
+            border: 1px solid var(--line);
+            background: rgba(244, 241, 231, 0.055);
+        }
+
+        .tool-card:nth-child(2) { min-height: 360px; }
+        .tool-card:nth-child(3) { min-height: 250px; }
+        .tool-card:nth-child(4) { min-height: 410px; }
+        .tool-card:nth-child(5) { min-height: 316px; }
+        .tool-card:nth-child(6) { min-height: 385px; }
+        .tool-card:nth-child(7) { min-height: 280px; }
+
+        .tool-card strong {
+            font-size: 26px;
+        }
+
+        .tool-card span {
+            color: var(--muted);
+            font-size: 18px;
+            line-height: 1.3;
+        }
+
+        .collapse-banner {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 22px;
+            padding: 28px 34px;
+            color: #101410;
+            background: var(--mint);
+        }
+
+        .collapse-banner strong {
+            font-family: var(--display);
+            font-size: 42px;
+        }
+
+        .collapse-banner span {
+            max-width: 720px;
+            color: rgba(16, 20, 16, 0.76);
+            font-size: 23px;
+        }
+
+        /* === DATA INTERACTION === */
+        .data-layout {
+            grid-template-columns: 610px 1fr;
+            align-items: stretch;
+        }
+
+        .data-controls {
+            display: flex;
+            gap: 12px;
+            margin-top: 28px;
+        }
+
+        .data-button,
+        .walk-button,
+        .flow-node {
+            border: 1px solid var(--line);
+            color: var(--ink);
+            background: var(--panel);
+            transition:
+                background 220ms ease,
+                color 220ms ease,
+                border-color 220ms ease,
+                transform 220ms var(--ease);
+        }
+
+        .data-button {
+            min-height: 54px;
+            padding: 0 20px;
+            font-family: var(--mono);
+            font-size: 17px;
+            font-weight: 700;
+        }
+
+        .data-button.active,
+        .walk-button.active,
+        .flow-node.active {
+            color: #101410;
+            background: var(--lime);
+            border-color: var(--lime);
+        }
+
+        .data-board {
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            gap: 22px;
+            padding: 34px;
+        }
+
+        .data-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: end;
+            gap: 20px;
+        }
+
+        .data-title strong {
+            font-family: var(--display);
+            font-size: 58px;
+        }
+
+        .bar-set {
+            display: grid;
+            align-content: end;
+            gap: 20px;
+            height: 462px;
+        }
+
+        .bar-row {
+            display: grid;
+            grid-template-columns: 190px 1fr 96px;
+            align-items: center;
+            gap: 18px;
+        }
+
+        .bar-row label {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 17px;
+        }
+
+        .bar-track {
+            height: 42px;
+            border: 1px solid var(--line);
+            background: rgba(0, 0, 0, 0.24);
+        }
+
+        .bar-fill {
+            width: calc(var(--value) * 1%);
+            height: 100%;
+            background: linear-gradient(90deg, var(--mint), var(--lime));
+            transition: width 520ms var(--ease);
+        }
+
+        .bar-row output {
+            color: var(--ink);
+            font-family: var(--mono);
+            font-size: 20px;
+            font-weight: 700;
+            text-align: right;
+        }
+
+        .insight-strip {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 14px;
+        }
+
+        /* === AGENTIC LOOP === */
+        .loop-layout {
+            grid-template-columns: 610px 1fr;
+            align-items: center;
+        }
+
+        .flow-panel {
+            position: relative;
+            height: 720px;
+            padding: 34px;
+        }
+
+        .flow-node {
+            position: absolute;
+            display: grid;
+            gap: 8px;
+            width: 230px;
+            min-height: 132px;
+            padding: 20px;
+            text-align: left;
+        }
+
+        .flow-node b {
+            font-size: 26px;
+        }
+
+        .flow-node span {
+            color: var(--muted);
+            font-size: 17px;
+            line-height: 1.28;
+        }
+
+        .flow-node.active span {
+            color: rgba(16, 20, 16, 0.7);
+        }
+
+        .flow-node[data-step="reason"] { left: 64px; top: 88px; }
+        .flow-node[data-step="code"] { right: 80px; top: 92px; }
+        .flow-node[data-step="visual"] { right: 70px; bottom: 116px; }
+        .flow-node[data-step="publish"] { left: 76px; bottom: 110px; }
+
+        .flow-center {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            display: grid;
+            place-items: center;
+            width: 250px;
+            height: 250px;
+            translate: -50% -50%;
+            border: 1px solid var(--line);
+            border-radius: 50%;
+            color: #101410;
+            background: var(--mint);
+            font-family: var(--display);
+            font-size: 38px;
+            font-weight: 900;
+            text-align: center;
+        }
+
+        .flow-ring {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 560px;
+            height: 560px;
+            translate: -50% -50%;
+            border: 1px dashed rgba(244, 241, 231, 0.26);
+            border-radius: 50%;
+            animation: spin 26s linear infinite;
+        }
+
+        @keyframes spin {
+            to { rotate: 360deg; }
+        }
+
+        .flow-detail {
+            display: grid;
+            gap: 18px;
+            padding: 36px;
+        }
+
+        .flow-detail h3 {
+            font-family: var(--display);
+            font-size: 62px;
+            line-height: 0.98;
+        }
+
+        .flow-detail p {
+            color: rgba(244, 241, 231, 0.8);
+            font-size: 30px;
+            line-height: 1.28;
+        }
+
+        /* === PRODUCT WALKTHROUGH === */
+        .walk-layout {
+            grid-template-columns: 500px 1fr;
+            align-items: stretch;
+        }
+
+        .walk-buttons {
+            display: grid;
+            gap: 14px;
+            margin-top: 34px;
+        }
+
+        .walk-button {
+            display: grid;
+            grid-template-columns: 54px 1fr;
+            align-items: center;
+            gap: 14px;
+            min-height: 76px;
+            padding: 14px 18px;
+            text-align: left;
+        }
+
+        .walk-button i {
+            display: grid;
+            place-items: center;
+            width: 44px;
+            height: 44px;
+            border: 1px solid currentColor;
+            border-radius: 50%;
+            font-family: var(--mono);
+            font-style: normal;
+            font-weight: 700;
+        }
+
+        .walk-button b {
+            display: block;
+            font-size: 23px;
+        }
+
+        .walk-button span {
+            color: var(--muted);
+            font-size: 17px;
+        }
+
+        .walk-button.active span {
+            color: rgba(16, 20, 16, 0.68);
+        }
+
+        .product-shell {
+            display: grid;
+            grid-template-columns: 310px 1fr 340px;
+            gap: 18px;
+            padding: 24px;
+            overflow: hidden;
+        }
+
+        .mini-sidebar,
+        .mini-chat,
+        .mini-preview,
+        .mini-inspector {
+            border: 1px solid var(--line);
+            background: rgba(0, 0, 0, 0.22);
+        }
+
+        .mini-sidebar {
+            display: grid;
+            align-content: start;
+            gap: 12px;
+            padding: 18px;
+        }
+
+        .mini-side-item {
+            height: 54px;
+            border: 1px solid var(--line);
+            background: rgba(244, 241, 231, 0.06);
+        }
+
+        .mini-chat {
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            padding: 24px;
+        }
+
+        .prompt-box {
+            min-height: 132px;
+            padding: 22px;
+            color: var(--ink);
+            background: rgba(215, 255, 107, 0.12);
+            border: 1px solid rgba(215, 255, 107, 0.42);
+            font-size: 24px;
+            line-height: 1.22;
+        }
+
+        .mini-steps {
+            display: grid;
+            align-content: center;
+            gap: 14px;
+        }
+
+        .mini-step {
+            display: grid;
+            grid-template-columns: 26px 1fr;
+            align-items: center;
+            gap: 12px;
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 17px;
+        }
+
+        .mini-step::before {
+            width: 18px;
+            height: 18px;
+            content: "";
+            border: 1px solid var(--line);
+            border-radius: 50%;
+        }
+
+        .mini-step.done::before,
+        .mini-step.active::before {
+            background: var(--lime);
+            border-color: var(--lime);
+        }
+
+        .mini-step.active {
+            color: var(--ink);
+        }
+
+        .mini-preview {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .mini-slide {
+            position: absolute;
+            inset: 20px;
+            display: grid;
+            align-content: space-between;
+            padding: 30px;
+            border: 1px solid var(--line);
+            background:
+                radial-gradient(circle at 72% 24%, rgba(154, 240, 193, 0.28), transparent 28%),
+                rgba(244, 241, 231, 0.07);
+        }
+
+        .mini-slide strong {
+            max-width: 360px;
+            font-family: var(--display);
+            font-size: 48px;
+            line-height: 0.96;
+        }
+
+        .mini-chart {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            align-items: end;
+            gap: 12px;
+            height: 160px;
+        }
+
+        .mini-chart span {
+            background: var(--mint);
+        }
+
+        .mini-chart span:nth-child(1) { height: 42%; }
+        .mini-chart span:nth-child(2) { height: 64%; }
+        .mini-chart span:nth-child(3) { height: 52%; }
+        .mini-chart span:nth-child(4) { height: 86%; background: var(--lime); }
+        .mini-chart span:nth-child(5) { height: 72%; }
+
+        .mini-inspector {
+            display: grid;
+            align-content: start;
+            gap: 16px;
+            padding: 22px;
+        }
+
+        .inspector-card {
+            display: grid;
+            gap: 8px;
+            padding: 18px;
+            border: 1px solid var(--line);
+            background: rgba(244, 241, 231, 0.055);
+        }
+
+        .inspector-card b {
+            color: var(--mint);
+            font-family: var(--mono);
+            font-size: 16px;
+            text-transform: uppercase;
+        }
+
+        .inspector-card span {
+            color: var(--muted);
+            font-size: 18px;
+            line-height: 1.28;
+        }
+
+        /* === ARTIFACT ANATOMY === */
+        .anatomy-layout {
+            grid-template-columns: 1fr 540px;
+            align-items: center;
+        }
+
+        .artifact-card {
+            position: relative;
+            height: 690px;
+            overflow: hidden;
+        }
+
+        .artifact-screen {
+            position: absolute;
+            inset: 46px;
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr;
+            gap: 28px;
+            padding: 34px;
+            border: 1px solid var(--line);
+            background:
+                linear-gradient(135deg, rgba(244, 241, 231, 0.08), rgba(244, 241, 231, 0.025)),
+                #111611;
+        }
+
+        .artifact-hero {
+            display: grid;
+            align-content: center;
+            gap: 24px;
+        }
+
+        .artifact-hero h3 {
+            font-family: var(--display);
+            font-size: 68px;
+            line-height: 0.96;
+        }
+
+        .artifact-hero p {
+            color: var(--muted);
+            font-size: 25px;
+            line-height: 1.32;
+        }
+
+        .artifact-demo {
+            display: grid;
+            grid-template-rows: 1fr auto;
+            gap: 18px;
+        }
+
+        .demo-graph {
+            position: relative;
+            border: 1px solid var(--line);
+            background: rgba(0, 0, 0, 0.22);
+        }
+
+        .demo-graph span {
+            position: absolute;
+            left: calc(var(--x) * 1%);
+            bottom: calc(var(--y) * 1%);
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--lime);
+            box-shadow: 0 0 30px rgba(215, 255, 107, 0.38);
+        }
+
+        .hotspot {
+            position: absolute;
+            display: grid;
+            place-items: center;
+            width: 42px;
+            height: 42px;
+            border: 1px solid rgba(16, 20, 16, 0.5);
+            border-radius: 50%;
+            color: #101410;
+            background: var(--lime);
+            font-family: var(--mono);
+            font-weight: 700;
+        }
+
+        .hotspot[data-note="structure"] { left: 96px; top: 126px; }
+        .hotspot[data-note="interaction"] { right: 222px; top: 190px; }
+        .hotspot[data-note="export"] { right: 118px; bottom: 98px; }
+
+        .anatomy-note {
+            display: grid;
+            gap: 18px;
+            padding: 34px;
+        }
+
+        .anatomy-note h3 {
+            font-family: var(--display);
+            font-size: 58px;
+            line-height: 1;
+        }
+
+        .anatomy-note p {
+            color: rgba(244, 241, 231, 0.78);
+            font-size: 29px;
+            line-height: 1.3;
+        }
+
+        /* === ROADMAP === */
+        .roadmap-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 18px;
+            margin-top: 36px;
+        }
+
+        .roadmap-card {
+            display: grid;
+            grid-template-rows: auto auto 1fr;
+            gap: 20px;
+            min-height: 480px;
+            padding: 28px;
+            border-top: 5px solid var(--mint);
+        }
+
+        .roadmap-card:nth-child(2) { border-color: var(--lime); }
+        .roadmap-card:nth-child(3) { border-color: var(--amber); }
+        .roadmap-card:nth-child(4) { border-color: var(--blue); }
+
+        .roadmap-card small {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 17px;
+            text-transform: uppercase;
+        }
+
+        .roadmap-card strong {
+            font-family: var(--display);
+            font-size: 42px;
+            line-height: 1;
+        }
+
+        .roadmap-card p {
+            color: rgba(244, 241, 231, 0.78);
+            font-size: 24px;
+            line-height: 1.3;
+        }
+
+        /* === CLOSE === */
+        .close-grid {
+            grid-template-columns: 1fr 520px;
+            align-items: center;
+        }
+
+        .close-stack {
+            display: grid;
+            gap: 18px;
+        }
+
+        .close-pill {
+            display: grid;
+            grid-template-columns: 70px 1fr;
+            align-items: center;
+            gap: 18px;
+            padding: 22px;
+        }
+
+        .close-pill i {
+            display: grid;
+            place-items: center;
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            color: #101410;
+            background: var(--lime);
+            font-family: var(--mono);
+            font-style: normal;
+            font-weight: 700;
+        }
+
+        .close-pill b {
+            display: block;
+            font-size: 26px;
+        }
+
+        .close-pill span {
+            color: var(--muted);
+            font-size: 19px;
+        }
+
+        /* === PRESENTATION CHROME === */
+        .deck-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            border: 1px solid rgba(244, 241, 231, 0.18);
+            border-radius: 999px;
+            background: rgba(11, 14, 16, 0.78);
+            backdrop-filter: blur(18px);
+        }
+
+        .deck-controls button {
+            display: grid;
+            place-items: center;
+            width: 40px;
+            height: 40px;
+            border: 0;
+            border-radius: 50%;
+            color: var(--ink);
+            background: rgba(244, 241, 231, 0.1);
+        }
+
+        .deck-controls span {
+            min-width: 72px;
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 14px;
+            text-align: center;
+        }
+
+        .progress {
+            position: fixed;
+            left: 0;
+            top: 0;
+            z-index: 1001;
+            width: 100%;
+            height: 4px;
+            background: rgba(244, 241, 231, 0.1);
+        }
+
+        .progress i {
+            display: block;
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, var(--mint), var(--lime));
+            transition: width 280ms var(--ease);
+        }
+
+        .edit-hotzone {
+            position: fixed;
+            left: 0;
+            top: 0;
+            z-index: 10000;
+            width: 84px;
+            height: 84px;
+        }
+
+        .edit-toggle {
+            position: fixed;
+            left: 18px;
+            top: 18px;
+            z-index: 10001;
+            width: 46px;
+            height: 46px;
+            border: 1px solid rgba(244, 241, 231, 0.2);
+            border-radius: 50%;
+            color: var(--ink);
+            background: rgba(11, 14, 16, 0.85);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 220ms ease;
+        }
+
+        .edit-toggle.show,
+        .edit-toggle.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        body.editing [contenteditable="true"] {
+            outline: 2px solid var(--lime);
+            outline-offset: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="progress"><i id="progressBar"></i></div>
+    <div class="deck-viewport">
+        <main class="deck-stage" id="deckStage">
+            <section class="slide active">
+                <div class="content title-layout">
+                    <div class="eyebrow reveal" contenteditable="false">Competitive asymmetry sample artifact</div>
+                    <div class="title-grid">
+                        <div>
+                            <h1 class="reveal" contenteditable="false">Slide Studio is not a deck generator.</h1>
+                            <p class="lead reveal" contenteditable="false">It is a presentation-specific coding agent that turns complex ideas into web-native artifacts: interactive demos, data stories, animated narratives, product walkthroughs, and pitch materials.</p>
+                        </div>
+                        <div class="title-orbit reveal" aria-label="Artifact capabilities">
+                            <span>Reasoning</span>
+                            <span>HTML<br>artifact</span>
+                            <span>Agentic<br>edits</span>
+                            <span>Delivery</span>
+                            <div class="orbit-core">One<br>loop</div>
+                        </div>
+                    </div>
+                    <div class="title-footer reveal">
+                        <span class="caption">Sample generated for the narrow wedge: complex, web-native presentation artifacts</span>
+                        <span class="chip">Interactive</span>
+                    </div>
+                </div>
+                <div class="nav-hint">Use arrows. Click controls on slides 4-7.</div>
+            </section>
+
+            <section class="slide">
+                <div class="content map-layout">
+                    <div>
+                        <div class="eyebrow reveal">Step 3 - Find Asymmetries</div>
+                        <h2 class="reveal" contenteditable="false">The opening is between slide tools and coding agents.</h2>
+                        <p class="lead reveal" contenteditable="false">Incumbents are strong where decks are page-based, template-led, and enterprise-managed. The opportunity is where the artifact itself needs logic, motion, data, and interaction.</p>
+                    </div>
+                    <div class="axis-map panel reveal">
+                        <span class="axis-label top">Expressive artifact</span>
+                        <span class="axis-label bottom">Static pages</span>
+                        <span class="axis-label left">Non-technical workflow</span>
+                        <span class="axis-label right">Technical workflow</span>
+                        <div class="dot powerpoint"><b>PowerPoint</b><small>mature default</small></div>
+                        <div class="dot canva"><b>Canva</b><small>accessible design</small></div>
+                        <div class="dot gamma"><b>Gamma</b><small>AI deck output</small></div>
+                        <div class="dot chatgpt"><b>ChatGPT</b><small>strong brain</small></div>
+                        <div class="dot coders"><b>Code agents</b><small>powerful but raw</small></div>
+                        <div class="dot studio"><b>Slide Studio</b><small>usable artifact agent</small></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content">
+                    <div>
+                        <div class="eyebrow reveal">The real competitor</div>
+                        <h2 class="reveal" contenteditable="false">Users are stitching together a Frankenstein workflow.</h2>
+                        <p class="lead reveal" contenteditable="false">The wedge is not “make a prettier slide.” It is collapsing content reasoning, layout, data, motion, product explanation, and export into one agentic creation loop.</p>
+                    </div>
+                    <div class="workflow-stack reveal">
+                        <div class="tool-card"><strong>ChatGPT</strong><span>draft story and copy</span></div>
+                        <div class="tool-card"><strong>PowerPoint</strong><span>assemble pages by hand</span></div>
+                        <div class="tool-card"><strong>Canva</strong><span>polish visuals</span></div>
+                        <div class="tool-card"><strong>Excel</strong><span>charts and tables</span></div>
+                        <div class="tool-card"><strong>Notion</strong><span>narrative notes</span></div>
+                        <div class="tool-card"><strong>Figma</strong><span>custom diagrams</span></div>
+                        <div class="tool-card"><strong>Manual glue</strong><span>exports, links, fixes</span></div>
+                    </div>
+                    <div class="collapse-banner reveal">
+                        <strong>Collapse it.</strong>
+                        <span>One prompt becomes a structured HTML artifact, then the user edits the artifact through natural language and targeted annotations.</span>
+                        <span class="chip">Idea to delivery</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content data-layout">
+                    <div>
+                        <div class="eyebrow reveal">Interactive data view</div>
+                        <h2 class="reveal" contenteditable="false">Choose the metric that matters.</h2>
+                        <p class="lead reveal" contenteditable="false">The product should prove it wins on expressive output quality for complex narratives before trying to match incumbent feature breadth.</p>
+                        <div class="data-controls reveal" role="group" aria-label="Metric selector">
+                            <button class="data-button active" data-metric="specificity">Specificity</button>
+                            <button class="data-button" data-metric="interactivity">Interactivity</button>
+                            <button class="data-button" data-metric="workflow">Workflow load</button>
+                        </div>
+                    </div>
+                    <div class="data-board panel reveal">
+                        <div class="data-title">
+                            <strong id="metricTitle">Artifact specificity</strong>
+                            <span class="caption" id="metricCaption">How closely the output matches a complex product or technical story.</span>
+                        </div>
+                        <div class="bar-set" id="barSet"></div>
+                        <div class="insight-strip">
+                            <div class="metric"><strong id="scoreA">92</strong><span>target score for the wedge</span></div>
+                            <div class="metric"><strong id="scoreB">4x</strong><span>fewer tool handoffs</span></div>
+                            <div class="metric"><strong id="scoreC">1</strong><span>shareable web artifact</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content loop-layout">
+                    <div>
+                        <div class="eyebrow reveal">Agentic creation loop</div>
+                        <h2 class="reveal" contenteditable="false">The system is valuable because it keeps reasoning and production together.</h2>
+                        <p class="lead reveal" contenteditable="false">Click each loop node. The product is strongest when every stage informs the next instead of making the user switch tools.</p>
+                    </div>
+                    <div class="flow-panel panel reveal">
+                        <div class="flow-ring"></div>
+                        <button class="flow-node active" data-step="reason"><b>Reason</b><span>derive story structure from the user’s goal</span></button>
+                        <button class="flow-node" data-step="code"><b>Generate</b><span>write HTML, CSS, JS, charts, states</span></button>
+                        <button class="flow-node" data-step="visual"><b>Refine</b><span>patch the artifact with chat or annotations</span></button>
+                        <button class="flow-node" data-step="publish"><b>Deliver</b><span>present, export, share, and preserve versions</span></button>
+                        <div class="flow-center">Artifact<br>Loop</div>
+                    </div>
+                    <div class="flow-detail panel reveal">
+                        <h3 id="flowTitle">Reason from intent</h3>
+                        <p id="flowText">The agent translates a messy product idea into a narrative, sections, visual explanations, and an interaction plan before it produces pages.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content walk-layout">
+                    <div>
+                        <div class="eyebrow reveal">Product walkthrough</div>
+                        <h2 class="reveal" contenteditable="false">A simple workflow hides a coding agent underneath.</h2>
+                        <div class="walk-buttons reveal" role="group" aria-label="Walkthrough steps">
+                            <button class="walk-button active" data-walk="prompt"><i>1</i><span><b>Describe the artifact</b><span>startup pitch, AI workflow, product demo, data story</span></span></button>
+                            <button class="walk-button" data-walk="generate"><i>2</i><span><b>Generate HTML</b><span>structure, visuals, motion, JS states, charts</span></span></button>
+                            <button class="walk-button" data-walk="edit"><i>3</i><span><b>Edit with the agent</b><span>chat, current scene, annotations, undo</span></span></button>
+                            <button class="walk-button" data-walk="deliver"><i>4</i><span><b>Deliver the artifact</b><span>live presentation, HTML, PDF, future share link</span></span></button>
+                        </div>
+                    </div>
+                    <div class="product-shell panel reveal">
+                        <div class="mini-sidebar">
+                            <div class="mini-side-item" style="background: var(--lime);"></div>
+                            <div class="mini-side-item"></div>
+                            <div class="mini-side-item"></div>
+                            <div class="mini-side-item"></div>
+                        </div>
+                        <div class="mini-chat">
+                            <div class="prompt-box" id="walkPrompt">Create a web-native investor pitch with an interactive AI workflow demo and benchmark chart.</div>
+                            <div class="mini-steps" id="walkSteps">
+                                <div class="mini-step active">Reading user intent</div>
+                                <div class="mini-step">Planning artifact structure</div>
+                                <div class="mini-step">Generating HTML runtime</div>
+                                <div class="mini-step">Saving editable version</div>
+                            </div>
+                            <span class="caption" id="walkCaption">The user expresses the job to be done, not a slide-by-slide spec.</span>
+                        </div>
+                        <div class="mini-inspector">
+                            <div class="mini-preview">
+                                <div class="mini-slide">
+                                    <strong id="miniTitle">AI Workflow Demo</strong>
+                                    <div class="mini-chart"><span></span><span></span><span></span><span></span><span></span></div>
+                                </div>
+                            </div>
+                            <div class="inspector-card"><b id="inspectorLabel">Artifact type</b><span id="inspectorText">Product walkthrough with embedded data story and interaction states.</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content anatomy-layout">
+                    <div>
+                        <div class="eyebrow reveal">What makes it an artifact?</div>
+                        <h2 class="reveal" contenteditable="false">It contains structure, behavior, and a delivery surface.</h2>
+                        <p class="lead reveal" contenteditable="false">Click the bright hotspots. These are the pieces incumbents tend to flatten back into static pages.</p>
+                    </div>
+                    <div class="artifact-card panel reveal">
+                        <div class="artifact-screen">
+                            <div class="artifact-hero">
+                                <h3>Customer AI Copilot Rollout</h3>
+                                <p>Executive narrative, architecture, rollout plan, ROI model, and live demo states in one browser-native file.</p>
+                            </div>
+                            <div class="artifact-demo">
+                                <div class="demo-graph">
+                                    <span style="--x:14;--y:20"></span>
+                                    <span style="--x:32;--y:42"></span>
+                                    <span style="--x:51;--y:58"></span>
+                                    <span style="--x:70;--y:78"></span>
+                                    <span style="--x:86;--y:88"></span>
+                                </div>
+                                <span class="chip">Live state</span>
+                            </div>
+                        </div>
+                        <button class="hotspot" data-note="structure">1</button>
+                        <button class="hotspot" data-note="interaction">2</button>
+                        <button class="hotspot" data-note="export">3</button>
+                    </div>
+                    <div class="anatomy-note panel reveal">
+                        <h3 id="noteTitle">Structured narrative</h3>
+                        <p id="noteText">The artifact carries a story model: problem, wedge, product loop, proof, roadmap, and delivery. The user does not have to manually map every page.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content">
+                    <div>
+                        <div class="eyebrow reveal">Step 4 - Design the right response</div>
+                        <h2 class="reveal" contenteditable="false">Roadmap the asymmetry, not the incumbent checklist.</h2>
+                        <p class="lead reveal" contenteditable="false">The sequence should first prove output quality in a narrow wedge, then widen toward editing, export, collaboration, and team workflows.</p>
+                    </div>
+                    <div class="roadmap-grid reveal">
+                        <article class="roadmap-card panel">
+                            <small>Now</small>
+                            <strong>One-shot quality</strong>
+                            <p>Win high-quality generation for startup pitches, AI project showcases, product walkthroughs, technical proposals, and data stories.</p>
+                        </article>
+                        <article class="roadmap-card panel">
+                            <small>Next</small>
+                            <strong>Agentic editing</strong>
+                            <p>Make chat, annotation, current-scene edits, undo, and version history feel like editing with a presentation-aware coding agent.</p>
+                        </article>
+                        <article class="roadmap-card panel">
+                            <small>Then</small>
+                            <strong>Delivery formats</strong>
+                            <p>Strengthen PDF, HTML, share links, PNG, and PowerPoint export without letting static formats define the product.</p>
+                        </article>
+                        <article class="roadmap-card panel">
+                            <small>Later</small>
+                            <strong>Team systems</strong>
+                            <p>Add brand kits, reusable artifact templates, collaboration, reviewer comments, billing, and enterprise workflows.</p>
+                        </article>
+                    </div>
+                </div>
+            </section>
+
+            <section class="slide">
+                <div class="content close-grid">
+                    <div>
+                        <div class="eyebrow reveal">The wedge</div>
+                        <h1 class="reveal" contenteditable="false">Make coding-agent power feel like a simple presentation workflow.</h1>
+                        <p class="lead reveal" contenteditable="false">That is the asymmetric advantage: not generic AI slides, but expressive, specific, web-native artifacts for complex ideas.</p>
+                    </div>
+                    <div class="close-stack reveal">
+                        <div class="close-pill panel"><i>01</i><span><b>Complex input</b><span>messy strategy, technical product, AI workflow, data-heavy proof</span></span></div>
+                        <div class="close-pill panel"><i>02</i><span><b>Agentic build</b><span>reasoning, structure, HTML, motion, interaction, visual systems</span></span></div>
+                        <div class="close-pill panel"><i>03</i><span><b>Delivered artifact</b><span>present live, edit through chat, export, share, preserve versions</span></span></div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div class="deck-controls" aria-label="Presentation controls">
+        <button id="prevBtn" type="button" title="Previous slide">‹</button>
+        <span id="counter">1 / 9</span>
+        <button id="nextBtn" type="button" title="Next slide">›</button>
+    </div>
+    <div class="edit-hotzone"></div>
+    <button class="edit-toggle" id="editToggle" type="button" title="Edit text (E)">E</button>
+
+    <script>
+        /* === SLIDE CONTROLLER === */
+        class SlidePresentation {
+            constructor() {
+                this.slides = Array.from(document.querySelectorAll(".slide"));
+                this.stage = document.getElementById("deckStage");
+                this.counter = document.getElementById("counter");
+                this.progress = document.getElementById("progressBar");
+                this.currentSlide = 0;
+                this.wheelLock = false;
+                this.setupStageScale();
+                this.setupKeyboardNav();
+                this.setupTouchNav();
+                this.setupWheelNav();
+                this.setupButtons();
+                this.showSlide(0);
+            }
+
+            setupStageScale() {
+                const scale = () => {
+                    const factor = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+                    const x = (window.innerWidth - 1920 * factor) / 2;
+                    const y = (window.innerHeight - 1080 * factor) / 2;
+                    this.stage.style.transform = `translate(${x}px, ${y}px) scale(${factor})`;
+                };
+                scale();
+                window.addEventListener("resize", scale);
+            }
+
+            setupKeyboardNav() {
+                document.addEventListener("keydown", (event) => {
+                    const editing = document.body.classList.contains("editing");
+                    if (editing && event.target && event.target.getAttribute("contenteditable") === "true") return;
+                    if (["ArrowRight", " ", "PageDown"].includes(event.key)) {
+                        event.preventDefault();
+                        this.next();
+                    }
+                    if (["ArrowLeft", "PageUp"].includes(event.key)) {
+                        event.preventDefault();
+                        this.prev();
+                    }
+                    if (event.key === "Home") this.showSlide(0);
+                    if (event.key === "End") this.showSlide(this.slides.length - 1);
+                });
+            }
+
+            setupTouchNav() {
+                let startX = 0;
+                let startY = 0;
+                document.addEventListener("touchstart", (event) => {
+                    startX = event.touches[0].clientX;
+                    startY = event.touches[0].clientY;
+                }, { passive: true });
+                document.addEventListener("touchend", (event) => {
+                    const end = event.changedTouches[0];
+                    const dx = end.clientX - startX;
+                    const dy = end.clientY - startY;
+                    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy)) {
+                        dx < 0 ? this.next() : this.prev();
+                    }
+                }, { passive: true });
+            }
+
+            setupWheelNav() {
+                document.addEventListener("wheel", (event) => {
+                    if (this.wheelLock || Math.abs(event.deltaY) < 30) return;
+                    this.wheelLock = true;
+                    event.deltaY > 0 ? this.next() : this.prev();
+                    setTimeout(() => { this.wheelLock = false; }, 520);
+                }, { passive: true });
+            }
+
+            setupButtons() {
+                document.getElementById("prevBtn").addEventListener("click", () => this.prev());
+                document.getElementById("nextBtn").addEventListener("click", () => this.next());
+            }
+
+            showSlide(index) {
+                this.currentSlide = Math.max(0, Math.min(index, this.slides.length - 1));
+                this.slides.forEach((slide, i) => {
+                    slide.classList.toggle("active", i === this.currentSlide);
+                    slide.classList.toggle("visible", i === this.currentSlide);
+                });
+                this.counter.textContent = `${this.currentSlide + 1} / ${this.slides.length}`;
+                this.progress.style.width = `${((this.currentSlide + 1) / this.slides.length) * 100}%`;
+            }
+
+            next() {
+                this.showSlide(this.currentSlide + 1);
+            }
+
+            prev() {
+                this.showSlide(this.currentSlide - 1);
+            }
+        }
+
+        /* === INTERACTIVE DATA MODULE === */
+        const dataViews = {
+            specificity: {
+                title: "Artifact specificity",
+                caption: "How closely each output can match a complex product or technical story.",
+                bars: [
+                    ["PowerPoint", 62, "62"],
+                    ["Canva", 58, "58"],
+                    ["Gamma / Tome", 70, "70"],
+                    ["ChatGPT alone", 76, "76"],
+                    ["Slide Studio wedge", 92, "92"]
+                ],
+                scores: ["92", "4x", "1"]
+            },
+            interactivity: {
+                title: "Interactive range",
+                caption: "Ability to express states, charts, walkthroughs, demos, and product logic.",
+                bars: [
+                    ["PowerPoint", 46, "46"],
+                    ["Canva", 40, "40"],
+                    ["Gamma / Tome", 52, "52"],
+                    ["Coding agents", 94, "94"],
+                    ["Slide Studio wedge", 88, "88"]
+                ],
+                scores: ["88", "5", "HTML"]
+            },
+            workflow: {
+                title: "Workflow load",
+                caption: "Lower is better: fewer tool switches and manual stitching steps.",
+                bars: [
+                    ["Frankenstein flow", 95, "95"],
+                    ["PowerPoint plus AI", 72, "72"],
+                    ["Canva plus docs", 68, "68"],
+                    ["Gamma draft flow", 50, "50"],
+                    ["Slide Studio loop", 24, "24"]
+                ],
+                scores: ["24", "1 loop", "0 glue"]
+            }
+        };
+
+        function renderDataView(key) {
+            const view = dataViews[key];
+            document.getElementById("metricTitle").textContent = view.title;
+            document.getElementById("metricCaption").textContent = view.caption;
+            document.getElementById("scoreA").textContent = view.scores[0];
+            document.getElementById("scoreB").textContent = view.scores[1];
+            document.getElementById("scoreC").textContent = view.scores[2];
+            document.getElementById("barSet").innerHTML = view.bars.map(([label, value, output]) => `
+                <div class="bar-row">
+                    <label>${label}</label>
+                    <div class="bar-track"><div class="bar-fill" style="--value:${value}"></div></div>
+                    <output>${output}</output>
+                </div>
+            `).join("");
+            document.querySelectorAll(".data-button").forEach((button) => {
+                button.classList.toggle("active", button.dataset.metric === key);
+            });
+        }
+
+        document.querySelectorAll(".data-button").forEach((button) => {
+            button.addEventListener("click", () => renderDataView(button.dataset.metric));
+        });
+        renderDataView("specificity");
+
+        /* === AGENTIC LOOP MODULE === */
+        const flowText = {
+            reason: ["Reason from intent", "The agent translates a messy product idea into a narrative, sections, visual explanations, and an interaction plan before it produces pages."],
+            code: ["Generate the artifact", "The system writes a single-file HTML presentation with CSS, JavaScript, chart states, animation, and a fixed presentation runtime."],
+            visual: ["Refine in context", "Natural-language edits and annotations patch the actual artifact, so iteration stays attached to the presentation surface."],
+            publish: ["Deliver without glue", "The same artifact can be presented fullscreen, exported as HTML or PDF, versioned, and later shared for review."]
+        };
+
+        document.querySelectorAll(".flow-node").forEach((button) => {
+            button.addEventListener("click", () => {
+                const [title, text] = flowText[button.dataset.step];
+                document.getElementById("flowTitle").textContent = title;
+                document.getElementById("flowText").textContent = text;
+                document.querySelectorAll(".flow-node").forEach((node) => node.classList.toggle("active", node === button));
+            });
+        });
+
+        /* === PRODUCT WALKTHROUGH MODULE === */
+        const walkViews = {
+            prompt: {
+                prompt: "Create a web-native investor pitch with an interactive AI workflow demo and benchmark chart.",
+                steps: ["Reading user intent", "Planning artifact structure", "Generating HTML runtime", "Saving editable version"],
+                active: 0,
+                caption: "The user expresses the job to be done, not a slide-by-slide spec.",
+                title: "AI Workflow Demo",
+                label: "Artifact type",
+                text: "Product walkthrough with embedded data story and interaction states."
+            },
+            generate: {
+                prompt: "Generation plan: story arc, product walkthrough, data proof, runtime controls, export-ready HTML.",
+                steps: ["Template rules loaded", "Narrative assembled", "Charts and states coded", "HTML validated"],
+                active: 2,
+                caption: "The coding agent builds behavior and structure, not only page text.",
+                title: "Coded Pitch Artifact",
+                label: "Runtime",
+                text: "Fixed 1920x1080 stage, keyboard navigation, animations, and browser-native interactions."
+            },
+            edit: {
+                prompt: "Edit slide 4: make the benchmark feel more decisive and add workflow-load comparison.",
+                steps: ["Current scene selected", "Patch generated", "Preview refreshed", "Version stored"],
+                active: 1,
+                caption: "Edits target the artifact itself through chat or annotations.",
+                title: "Agentic Edit Loop",
+                label: "Editing surface",
+                text: "Chat edits, annotation apply, undo, and version history keep iteration local to the artifact."
+            },
+            deliver: {
+                prompt: "Open the delivered artifact, present live, then export HTML/PDF for follow-up.",
+                steps: ["Artifact ready", "Fullscreen live", "HTML downloaded", "PDF exported"],
+                active: 3,
+                caption: "The output is no longer trapped in a draft tool.",
+                title: "Delivered Artifact",
+                label: "Delivery",
+                text: "Live browser presentation today; share links, review comments, and team workflows later."
+            }
+        };
+
+        function renderWalk(key) {
+            const view = walkViews[key];
+            document.getElementById("walkPrompt").textContent = view.prompt;
+            document.getElementById("walkCaption").textContent = view.caption;
+            document.getElementById("miniTitle").textContent = view.title;
+            document.getElementById("inspectorLabel").textContent = view.label;
+            document.getElementById("inspectorText").textContent = view.text;
+            document.getElementById("walkSteps").innerHTML = view.steps.map((step, index) => `
+                <div class="mini-step ${index < view.active ? "done" : ""} ${index === view.active ? "active" : ""}">${step}</div>
+            `).join("");
+            document.querySelectorAll(".walk-button").forEach((button) => {
+                button.classList.toggle("active", button.dataset.walk === key);
+            });
+        }
+
+        document.querySelectorAll(".walk-button").forEach((button) => {
+            button.addEventListener("click", () => renderWalk(button.dataset.walk));
+        });
+        renderWalk("prompt");
+
+        /* === ARTIFACT ANATOMY MODULE === */
+        const notes = {
+            structure: ["Structured narrative", "The artifact carries a story model: problem, wedge, product loop, proof, roadmap, and delivery. The user does not have to manually map every page."],
+            interaction: ["Embedded behavior", "Charts, walkthroughs, scenario states, and demos can run inside the presentation because the output is HTML-first."],
+            export: ["Delivery surface", "The same file can be presented live, downloaded as source HTML, exported to PDF, or shared in a future reviewer workflow."]
+        };
+
+        document.querySelectorAll(".hotspot").forEach((button) => {
+            button.addEventListener("click", () => {
+                const [title, text] = notes[button.dataset.note];
+                document.getElementById("noteTitle").textContent = title;
+                document.getElementById("noteText").textContent = text;
+            });
+        });
+
+        /* === INLINE TEXT EDITING === */
+        class InlineEditor {
+            constructor() {
+                this.isActive = false;
+                this.key = "slide-studio-asymmetry-demo-edits";
+                this.editableNodes = Array.from(document.querySelectorAll("h1, h2, h3, p, strong, b, span, small")).filter((node) => {
+                    return !node.closest(".deck-controls") && !node.closest("button") && !node.classList.contains("chip");
+                });
+                this.restore();
+            }
+
+            toggleEditMode() {
+                this.isActive = !this.isActive;
+                document.body.classList.toggle("editing", this.isActive);
+                document.getElementById("editToggle").classList.toggle("active", this.isActive);
+                this.editableNodes.forEach((node) => {
+                    node.setAttribute("contenteditable", String(this.isActive));
+                });
+                if (!this.isActive) this.save();
+            }
+
+            save() {
+                const values = this.editableNodes.map((node) => node.innerHTML);
+                localStorage.setItem(this.key, JSON.stringify(values));
+            }
+
+            restore() {
+                try {
+                    const values = JSON.parse(localStorage.getItem(this.key) || "[]");
+                    values.forEach((value, index) => {
+                        if (this.editableNodes[index]) this.editableNodes[index].innerHTML = value;
+                    });
+                } catch (error) {
+                    localStorage.removeItem(this.key);
+                }
+            }
+        }
+
+        const presentation = new SlidePresentation();
+        const editor = new InlineEditor();
+        const hotzone = document.querySelector(".edit-hotzone");
+        const editToggle = document.getElementById("editToggle");
+        let hideEditToggleTimer = null;
+
+        hotzone.addEventListener("mouseenter", () => {
+            clearTimeout(hideEditToggleTimer);
+            editToggle.classList.add("show");
+        });
+        hotzone.addEventListener("mouseleave", () => {
+            hideEditToggleTimer = setTimeout(() => {
+                if (!editor.isActive) editToggle.classList.remove("show");
+            }, 400);
+        });
+        hotzone.addEventListener("click", () => editor.toggleEditMode());
+        editToggle.addEventListener("mouseenter", () => clearTimeout(hideEditToggleTimer));
+        editToggle.addEventListener("mouseleave", () => {
+            hideEditToggleTimer = setTimeout(() => {
+                if (!editor.isActive) editToggle.classList.remove("show");
+            }, 400);
+        });
+        editToggle.addEventListener("click", () => editor.toggleEditMode());
+
+        document.addEventListener("keydown", (event) => {
+            const targetEditable = event.target && event.target.getAttribute("contenteditable") === "true";
+            if ((event.key === "e" || event.key === "E") && !targetEditable) {
+                event.preventDefault();
+                editor.toggleEditMode();
+            }
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+                event.preventDefault();
+                editor.save();
+            }
+        });
+    </script>
+</body>
+</html>

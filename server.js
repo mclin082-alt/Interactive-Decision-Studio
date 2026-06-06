@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const net = require('net');
+const tls = require('tls');
 const { execFile } = require('child_process');
 const express = require('express');
 const { DatabaseSync } = require('node:sqlite');
@@ -19,6 +21,14 @@ const FRONTEND_SLIDES_DIR = process.env.FRONTEND_SLIDES_DIR || '/Users/lll/.code
 const TEMPLATE_DIR = path.join(FRONTEND_SLIDES_DIR, 'beautiful-html-templates', 'templates');
 const isProduction = process.env.NODE_ENV === 'production';
 const APP_BASE_URL = String(process.env.APP_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
+const SMTP_CONFIG = {
+  host: String(process.env.SMTP_HOST || '').trim(),
+  port: Number(process.env.SMTP_PORT || 465),
+  user: String(process.env.SMTP_USER || '').trim(),
+  pass: String(process.env.SMTP_PASS || '').trim(),
+  secure: String(process.env.SMTP_SECURE || 'true') !== 'false'
+};
+const EMAIL_FROM = String(process.env.EMAIL_FROM || SMTP_CONFIG.user || 'Slide Studio <verify@slidestudio.local>').trim();
 const QUOTAS = {
   guestCookieDaily: Number(process.env.GUEST_COOKIE_DAILY_LIMIT || 3),
   guestDeviceDaily: Number(process.env.GUEST_DEVICE_DAILY_LIMIT || 3),
@@ -29,6 +39,9 @@ const QUOTAS = {
   freeDailyBudgetCents: Number(process.env.FREE_DAILY_BUDGET_CENTS || 500),
   generationCostCents: Number(process.env.GENERATION_COST_CENTS || 25)
 };
+const GENERATION_MAX_TOKENS = Number(process.env.GENERATION_MAX_TOKENS || 6500);
+const EDIT_MAX_TOKENS = Number(process.env.EDIT_MAX_TOKENS || 9000);
+const AI_REQUEST_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS || 120000);
 const BASIC_TRIAL_TEMPLATE_IDS = new Set((process.env.BASIC_TRIAL_TEMPLATE_IDS || 'soft-editorial,blue-professional')
   .split(',')
   .map((item) => item.trim())
@@ -177,6 +190,7 @@ function ensureDb() {
   ensureColumn(db, 'users', 'credits', 'INTEGER DEFAULT 0');
   ensureColumn(db, 'users', 'plan', "TEXT DEFAULT 'free'");
   ensureColumn(db, 'users', 'is_guest', 'INTEGER DEFAULT 0');
+  ensureColumn(db, 'email_verification_tokens', 'pending_guest_user_id', 'TEXT');
   const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
   if (!isMigratingLegacyDb && userCount === 0 && fs.existsSync(JSON_DB_FILE)) {
     try {
@@ -300,6 +314,7 @@ function readDb() {
   const verificationTokens = db.prepare('SELECT * FROM email_verification_tokens ORDER BY datetime(created_at) DESC').all().map((row) => ({
     token: row.token,
     userId: row.user_id,
+    pendingGuestUserId: row.pending_guest_user_id || '',
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     usedAt: row.used_at || ''
@@ -344,8 +359,8 @@ function writeDb(db) {
       id, user_id, identity_type, identity_key, action, cost_cents, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const insertVerificationToken = sqlite.prepare(`INSERT INTO email_verification_tokens (
-      token, user_id, created_at, expires_at, used_at
-    ) VALUES (?, ?, ?, ?, ?)`);
+      token, user_id, created_at, expires_at, used_at, pending_guest_user_id
+    ) VALUES (?, ?, ?, ?, ?, ?)`);
 
     for (const user of data.users) {
       insertUser.run(
@@ -433,7 +448,14 @@ function writeDb(db) {
     }
     for (const entry of data.verificationTokens) {
       if (data.users.some((user) => user.id === entry.userId)) {
-        insertVerificationToken.run(entry.token, entry.userId, entry.createdAt || new Date().toISOString(), entry.expiresAt || new Date().toISOString(), entry.usedAt || '');
+        insertVerificationToken.run(
+          entry.token,
+          entry.userId,
+          entry.createdAt || new Date().toISOString(),
+          entry.expiresAt || new Date().toISOString(),
+          entry.usedAt || '',
+          entry.pendingGuestUserId || ''
+        );
       }
     }
     sqlite.exec('COMMIT');
@@ -664,18 +686,177 @@ function ensureGenerationAllowance({ req, res, db, user, template }) {
   };
 }
 
-function createEmailVerification(db, user) {
+function createEmailVerification(db, user, options = {}) {
   const token = crypto.randomBytes(32).toString('hex');
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 3).toISOString();
   db.verificationTokens.unshift({
     token,
     userId: user.id,
+    pendingGuestUserId: options.pendingGuestUserId || '',
     createdAt: now.toISOString(),
     expiresAt,
     usedAt: ''
   });
   return `${APP_BASE_URL}/api/verify-email?token=${token}`;
+}
+
+function mergeGuestProjectsIntoUser(db, guestUserId, user) {
+  if (!guestUserId || !user || guestUserId === user.id) return { decks: 0 };
+  const guest = db.users.find((item) => item.id === guestUserId && item.isGuest);
+  if (!guest) return { decks: 0 };
+
+  let decks = 0;
+  for (const deck of db.decks || []) {
+    if (deck.userId !== guest.id) continue;
+    deck.userId = user.id;
+    deck.updatedAt = deck.updatedAt || new Date().toISOString();
+    decks += 1;
+  }
+
+  for (const entry of db.usageEvents || []) {
+    if (entry.userId === guest.id) entry.userId = user.id;
+  }
+
+  for (const [token, session] of Object.entries(db.sessions || {})) {
+    if (session.userId === guest.id) delete db.sessions[token];
+  }
+
+  if (decks > 0) {
+    db.users = db.users.filter((item) => item.id !== guest.id);
+  }
+
+  return { decks };
+}
+
+function createVerificationEmailPreview(user, verificationLink) {
+  return {
+    to: user.email,
+    from: EMAIL_FROM,
+    subject: 'Verify your Slide Studio email',
+    provider: 'gmail',
+    verificationLink,
+    gmailUrl: `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(`from:${formatEmailAddress(EMAIL_FROM)} Slide Studio verify`)}`,
+    expiresIn: '3 days',
+    delivered: false,
+    delivery: 'local-preview'
+  };
+}
+
+function hasSmtpConfig() {
+  return Boolean(SMTP_CONFIG.host && SMTP_CONFIG.user && SMTP_CONFIG.pass);
+}
+
+function formatEmailAddress(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/<([^>]+)>/);
+  return match ? match[1].trim() : text;
+}
+
+function base64Line(value) {
+  return Buffer.from(String(value), 'utf8').toString('base64');
+}
+
+function smtpCommand(socket, command, expected = []) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const cleanup = () => {
+      socket.off('data', onData);
+      socket.off('error', onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk) => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      const last = lines[lines.length - 1] || '';
+      if (!/^\d{3} /.test(last)) return;
+      cleanup();
+      const code = Number(last.slice(0, 3));
+      if (expected.length && !expected.includes(code)) {
+        reject(new Error(`SMTP command failed with ${code}: ${buffer.trim()}`));
+      } else {
+        resolve(buffer);
+      }
+    };
+    socket.on('data', onData);
+    socket.on('error', onError);
+    if (command) socket.write(`${command}\r\n`);
+  });
+}
+
+async function sendSmtpMail({ to, from, subject, text, html }) {
+  const socket = SMTP_CONFIG.secure
+    ? tls.connect({ host: SMTP_CONFIG.host, port: SMTP_CONFIG.port, servername: SMTP_CONFIG.host })
+    : net.connect({ host: SMTP_CONFIG.host, port: SMTP_CONFIG.port });
+  socket.setTimeout(15000);
+  socket.on('timeout', () => socket.destroy(new Error('SMTP connection timed out.')));
+
+  try {
+    await smtpCommand(socket, '', [220]);
+    await smtpCommand(socket, `EHLO ${SMTP_CONFIG.host}`, [250]);
+    await smtpCommand(socket, 'AUTH LOGIN', [334]);
+    await smtpCommand(socket, base64Line(SMTP_CONFIG.user), [334]);
+    await smtpCommand(socket, base64Line(SMTP_CONFIG.pass), [235]);
+    await smtpCommand(socket, `MAIL FROM:<${formatEmailAddress(from)}>`, [250]);
+    await smtpCommand(socket, `RCPT TO:<${formatEmailAddress(to)}>`, [250, 251]);
+    await smtpCommand(socket, 'DATA', [354]);
+    const boundary = `slide-studio-${crypto.randomBytes(8).toString('hex')}`;
+    const message = [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      text,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      html,
+      '',
+      `--${boundary}--`,
+      '.'
+    ].join('\r\n');
+    await smtpCommand(socket, message, [250]);
+    await smtpCommand(socket, 'QUIT', [221]);
+  } finally {
+    socket.end();
+  }
+}
+
+async function sendVerificationEmail(user, verificationLink) {
+  const preview = createVerificationEmailPreview(user, verificationLink);
+  if (!hasSmtpConfig()) return preview;
+
+  const text = `Verify your Slide Studio email:\n\n${verificationLink}\n\nThis link expires in 3 days.`;
+  const html = `
+    <div style="font-family:Inter,Arial,sans-serif;color:#25231f;line-height:1.5">
+      <h1 style="font-size:24px;margin:0 0 12px">Verify your Slide Studio email</h1>
+      <p>Click the button below to unlock your free credits.</p>
+      <p><a href="${escapeHtml(verificationLink)}" style="display:inline-block;padding:12px 16px;background:#17614f;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">Verify email</a></p>
+      <p style="color:#625f58;font-size:13px">This link expires in 3 days.</p>
+    </div>
+  `;
+  await sendSmtpMail({ to: user.email, from: EMAIL_FROM, subject: preview.subject, text, html });
+  return { ...preview, delivered: true, delivery: 'smtp' };
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function publicDeck(deck) {
@@ -781,6 +962,70 @@ const templates = [
   { id: 'job-candidate', slug: 'sakura-chroma', name: 'Job Case Study', category: 'Job & career', accent: '#E5392A', uses: 522, deckPath: '/ai-creation-sakura-chroma.html' }
 ];
 
+const artifactTypes = [
+  {
+    id: 'product-walkthrough',
+    name: 'Product walkthrough',
+    focus: 'Explain a product through a user journey, demo states, workflow, data proof, and delivery moment.',
+    requiredSlides: 'intent/problem, product walkthrough, workflow diagram, benchmark or adoption data, before/after comparison, delivery/export moment',
+    interactions: 'a clickable walkthrough stepper, a flow node selector, and at least one metric/chart state toggle'
+  },
+  {
+    id: 'startup-pitch',
+    name: 'Startup pitch',
+    focus: 'Turn a startup narrative into a web-native pitch artifact with wedge, market proof, product demo, traction, and roadmap.',
+    requiredSlides: 'category insight, competitive asymmetry, product demo, market or traction data, business model, roadmap, ask/next step',
+    interactions: 'a competitive map or wedge selector, a traction/market metric toggle, and a product demo walkthrough'
+  },
+  {
+    id: 'ai-project-showcase',
+    name: 'AI project showcase',
+    focus: 'Show an AI project as a working narrative: user problem, model/workflow, architecture, evals, risks, and outcome.',
+    requiredSlides: 'problem, AI workflow, architecture diagram, eval dashboard, product walkthrough, risk controls, outcome',
+    interactions: 'a clickable AI workflow, an eval metric toggle, and an architecture or state walkthrough'
+  },
+  {
+    id: 'technical-proposal',
+    name: 'Technical proposal',
+    focus: 'Explain a technical proposal with system flow, tradeoffs, implementation stages, risk controls, and rollout plan.',
+    requiredSlides: 'current state, target architecture, data/process flow, tradeoff matrix, phased rollout, risk/mitigation, decision request',
+    interactions: 'a clickable architecture flow, a tradeoff matrix toggle, and a phased rollout selector'
+  },
+  {
+    id: 'data-story',
+    name: 'Data story',
+    focus: 'Build a data-heavy narrative that guides the audience through benchmarks, patterns, implications, and action.',
+    requiredSlides: 'question, data landscape, segmented chart, comparison view, insight flow, recommendation, action plan',
+    interactions: 'multiple metric toggles, at least one comparative chart, and a clickable insight path'
+  },
+  {
+    id: 'sales-narrative',
+    name: 'Sales narrative',
+    focus: 'Create a sales artifact that moves from pain to proof to product walkthrough to buyer-specific next steps.',
+    requiredSlides: 'buyer pain, cost of status quo, solution walkthrough, proof/data, implementation path, objection handling, close plan',
+    interactions: 'a pain-to-value walkthrough, ROI or impact metric toggle, and implementation timeline selector'
+  }
+];
+
+function getArtifactType(id) {
+  return artifactTypes.find((item) => item.id === id) || artifactTypes[0];
+}
+
+function parseTargetContext(value) {
+  try {
+    return value ? JSON.parse(value) : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function artifactContextText(artifactType) {
+  return `Artifact type: ${artifactType.name}
+Focus: ${artifactType.focus}
+Expected narrative sections: ${artifactType.requiredSlides}
+Required interactive modules: ${artifactType.interactions}`;
+}
+
 const FALLBACK_VIEWPORT_BASE = `
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--stage-bg, #000); }
 .deck-viewport { position: fixed; inset: 0; overflow: hidden; background: var(--stage-bg, #000); }
@@ -858,46 +1103,77 @@ function getServerModelConfig() {
   });
 }
 
-function buildGenerationPrompt({ prompt, template, viewportBase, htmlTemplate, animationPatterns, designMd }) {
-  const safeDesign = designMd.length > 30000 ? `${designMd.slice(0, 30000)}\n\n[design.md truncated for context size]` : designMd;
-  return {
-    system: `You are Slide Studio's HTML slide generation engine. Generate production-quality, single-file HTML slide decks only.
+function summarizeDesignRecipe(designMd, template) {
+  const text = String(designMd || FALLBACK_DESIGN_MD);
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('```'))
+    .filter((line) => /color|palette|typography|font|layout|grid|spacing|radius|shadow|button|card|visual|tone|motion|animation|background|accent|heading|data|chart/i.test(line))
+    .slice(0, 42);
+  const summary = lines.join('\n').slice(0, 5200);
+  return summary || `Template: ${template.name}. ${FALLBACK_DESIGN_MD}`;
+}
 
-Non-negotiable rules:
-- Output only one complete HTML document. No markdown fences, no commentary.
-- Single self-contained HTML file with inline CSS and JS. External font links are allowed.
-- Fixed 1920x1080 stage. The whole deck-stage scales uniformly to the viewport. Do not use responsive slide reflow.
-- Include the full viewport-base.css rules in the style block.
-- Every slide must be <section class="slide">. Use .active/.visible for visibility; never use display:none for slide switching.
-- Keep text inside bounds: no overflow, no overlapping panels, no tiny unreadable text.
-- Include keyboard navigation, touch navigation, mouse wheel navigation, and a small page counter outside the slide stage.
-- Include prefers-reduced-motion support.
-- Use the selected template design recipe. Do not copy demo content from the template.
-- Use 6 to 10 slides unless the user's prompt clearly asks for a different length.
-- This is for a user-facing AI slide maker. The deck must look finished, not like a diagnostic sample.`,
+function buildGenerationPrompt({ prompt, template, artifactType, designMd }) {
+  const designSummary = summarizeDesignRecipe(designMd, template);
+  const artifactContext = artifactContextText(artifactType);
+  return {
+    system: `You are Slide Studio's senior presentation designer. Return only valid JSON for a high-quality web-native HTML presentation.
+
+The app will render the final HTML locally, so do not write a full HTML document, CSS file, or JavaScript runtime. Your job is the narrative, page content, visual intent, data, and interaction design.
+
+JSON schema:
+{
+  "title": "deck title",
+  "subtitle": "short framing line",
+  "themeNotes": "visual direction in one sentence",
+  "slides": [
+    {
+      "kicker": "short label",
+      "title": "slide title",
+      "subtitle": "supporting sentence",
+      "layout": "hero | split | metrics | workflow | comparison | chart | roadmap | closing",
+      "bullets": ["3 to 5 concise bullets"],
+      "metrics": [{"label":"", "value":"", "note":""}],
+      "steps": [{"label":"", "title":"", "detail":""}],
+      "details": [{"trigger":"", "title":"", "body":"", "type":"hotspot | timeline | card"}],
+      "reveals": ["short staged point"],
+      "beforeAfter": {"beforeTitle":"", "beforeBody":"", "afterTitle":"", "afterBody":""},
+      "segments": [{"label":"", "title":"", "body":""}],
+      "chart": [{"label":"", "value": 42}],
+      "chartDatasets": [{"label":"", "insight":"", "data":[{"label":"", "value": 42}]}],
+      "callout": "one crisp insight",
+      "speakerNote": "why this slide matters"
+    }
+  ]
+}
+
+Rules:
+- Return JSON only. No markdown fences.
+- Use 5 to 7 slides unless the user explicitly requests another count.
+- Every slide must have concrete, presentation-ready copy, not placeholders.
+- Include at least one workflow/process slide, one data/chart slide, and one comparison or metrics slide.
+- Design for a polished 1920x1080 HTML deck with interactive controls rendered by the app.
+- Use web-native interaction deliberately: add clickable details for drilldown, reveals for staged explanation, beforeAfter for transformation stories, segments for multiple perspectives, and chartDatasets for switchable metrics.
+- If data is illustrative, make that clear in labels or notes.`,
     user: `User prompt:
 ${prompt}
+
+Artifact direction:
+${artifactContext}
 
 Selected template:
 ${template.name} (${template.slug})
 
-Template design.md:
-${safeDesign}
+Compact template recipe:
+${designSummary}
 
-Mandatory viewport-base.css to include in full:
-${viewportBase}
-
-HTML architecture reference:
-${htmlTemplate.slice(0, 9000)}
-
-Animation reference:
-${animationPatterns.slice(0, 6000)}
-
-Generate the final deck now as one complete HTML file.`
+Create the JSON design spec now.`
   };
 }
 
-async function callChatCompletions({ modelConfig, messages }) {
+async function callChatCompletions({ modelConfig, messages, maxTokens = EDIT_MAX_TOKENS }) {
   if (!modelConfig.apiKey) {
     throw new Error('The server model API key is not configured yet. Ask the workspace owner to set OPENAI_API_KEY or AI_API_KEY.');
   }
@@ -907,19 +1183,25 @@ async function callChatCompletions({ modelConfig, messages }) {
     messages
   };
   if (/^gpt-5/i.test(modelConfig.model)) {
-    body.max_completion_tokens = 14000;
+    body.max_completion_tokens = maxTokens;
   } else {
     body.temperature = 0.72;
-    body.max_tokens = 14000;
+    body.max_tokens = maxTokens;
   }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${modelConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(body)
-  });
+    body: JSON.stringify(body),
+    signal: controller.signal
+  }).catch((error) => {
+    if (error.name === 'AbortError') throw new Error(`AI API request timed out after ${Math.round(AI_REQUEST_TIMEOUT_MS / 1000)} seconds.`);
+    throw error;
+  }).finally(() => clearTimeout(timeout));
   const text = await response.text();
   let data = {};
   try {
@@ -953,6 +1235,522 @@ function extractHtml(raw) {
   return `${SLIDE_RUNTIME_CSS}\n${html}`;
 }
 
+function normalizeDeckSpec(rawSpec, prompt, artifactType) {
+  const spec = rawSpec && typeof rawSpec === 'object' ? rawSpec : {};
+  const slides = Array.isArray(spec.slides) ? spec.slides : [];
+  const normalizedSlides = slides.slice(0, 9).map((slide, index) => ({
+    kicker: String(slide.kicker || `Slide ${index + 1}`).slice(0, 48),
+    title: String(slide.title || `Section ${index + 1}`).slice(0, 96),
+    subtitle: String(slide.subtitle || '').slice(0, 220),
+    layout: ['hero', 'split', 'metrics', 'workflow', 'comparison', 'chart', 'roadmap', 'closing'].includes(slide.layout) ? slide.layout : 'split',
+    bullets: Array.isArray(slide.bullets) ? slide.bullets.slice(0, 5).map((item) => String(item).slice(0, 180)) : [],
+    metrics: Array.isArray(slide.metrics) ? slide.metrics.slice(0, 4).map((item) => ({
+      label: String(item.label || '').slice(0, 44),
+      value: String(item.value || '').slice(0, 32),
+      note: String(item.note || '').slice(0, 90)
+    })) : [],
+    steps: Array.isArray(slide.steps) ? slide.steps.slice(0, 5).map((item, stepIndex) => ({
+      label: String(item.label || `${stepIndex + 1}`).slice(0, 28),
+      title: String(item.title || item.label || `Step ${stepIndex + 1}`).slice(0, 64),
+      detail: String(item.detail || '').slice(0, 180)
+    })) : [],
+    details: Array.isArray(slide.details) ? slide.details.slice(0, 5).map((item, detailIndex) => ({
+      trigger: String(item.trigger || item.label || `Detail ${detailIndex + 1}`).slice(0, 36),
+      title: String(item.title || item.trigger || `Detail ${detailIndex + 1}`).slice(0, 72),
+      body: String(item.body || item.detail || '').slice(0, 220),
+      type: ['hotspot', 'timeline', 'card'].includes(item.type) ? item.type : 'card'
+    })).filter((item) => item.title || item.body) : [],
+    reveals: Array.isArray(slide.reveals) ? slide.reveals.slice(0, 5).map((item) => String(item).slice(0, 150)).filter(Boolean) : [],
+    beforeAfter: slide.beforeAfter && typeof slide.beforeAfter === 'object' ? {
+      beforeTitle: String(slide.beforeAfter.beforeTitle || 'Before').slice(0, 64),
+      beforeBody: String(slide.beforeAfter.beforeBody || '').slice(0, 220),
+      afterTitle: String(slide.beforeAfter.afterTitle || 'After').slice(0, 64),
+      afterBody: String(slide.beforeAfter.afterBody || '').slice(0, 220)
+    } : null,
+    segments: Array.isArray(slide.segments) ? slide.segments.slice(0, 4).map((item, segmentIndex) => ({
+      label: String(item.label || `View ${segmentIndex + 1}`).slice(0, 28),
+      title: String(item.title || item.label || `View ${segmentIndex + 1}`).slice(0, 70),
+      body: String(item.body || item.detail || '').slice(0, 220)
+    })).filter((item) => item.title || item.body) : [],
+    chart: Array.isArray(slide.chart) ? slide.chart.slice(0, 6).map((item) => ({
+      label: String(item.label || '').slice(0, 42),
+      value: Math.max(0, Math.min(100, Number(item.value) || 0))
+    })) : [],
+    chartDatasets: Array.isArray(slide.chartDatasets) ? slide.chartDatasets.slice(0, 4).map((dataset, datasetIndex) => ({
+      label: String(dataset.label || `Metric ${datasetIndex + 1}`).slice(0, 32),
+      insight: String(dataset.insight || '').slice(0, 150),
+      data: Array.isArray(dataset.data) ? dataset.data.slice(0, 6).map((item) => ({
+        label: String(item.label || '').slice(0, 42),
+        value: Math.max(0, Math.min(100, Number(item.value) || 0))
+      })) : []
+    })).filter((dataset) => dataset.data.length) : [],
+    callout: String(slide.callout || '').slice(0, 180),
+    speakerNote: String(slide.speakerNote || '').slice(0, 220)
+  }));
+
+  if (!normalizedSlides.length) {
+    normalizedSlides.push({
+      kicker: artifactType.name,
+      title: String(prompt || 'Generated presentation').slice(0, 96),
+      subtitle: artifactType.focus,
+      layout: 'hero',
+      bullets: ['A focused narrative generated from the user prompt.', 'A web-native artifact structure with reusable runtime controls.', 'Ready for refinement through chat edits.'],
+      metrics: [],
+      steps: [],
+      details: [],
+      reveals: [],
+      beforeAfter: null,
+      segments: [],
+      chart: [],
+      chartDatasets: [],
+      callout: 'Generated with a lightweight structured pipeline.',
+      speakerNote: ''
+    });
+  }
+
+  return {
+    title: String(spec.title || prompt || 'Generated deck').slice(0, 100),
+    subtitle: String(spec.subtitle || artifactType.focus || '').slice(0, 220),
+    themeNotes: String(spec.themeNotes || '').slice(0, 220),
+    slides: normalizedSlides
+  };
+}
+
+function themeForTemplate(template) {
+  const themes = {
+    'sakura-chroma': {
+      bg: '#140f16',
+      surface: '#fff7fb',
+      ink: '#211821',
+      muted: '#775f6e',
+      accent: '#e54489',
+      accent2: '#29b6c8',
+      accent3: '#f3c744',
+      font: "'Albert Sans', 'Inter', Arial, sans-serif",
+      display: "'Big Shoulders Display', 'Albert Sans', Arial, sans-serif"
+    },
+    'soft-editorial': {
+      bg: '#f6f1e8',
+      surface: '#fffdf8',
+      ink: '#25231f',
+      muted: '#69645a',
+      accent: '#17614f',
+      accent2: '#d7de62',
+      accent3: '#d97045',
+      font: "'Inter', 'Noto Sans SC', Arial, sans-serif",
+      display: "'Inter', 'Noto Sans SC', Arial, sans-serif"
+    },
+    'blue-professional': {
+      bg: '#eef5fa',
+      surface: '#ffffff',
+      ink: '#18283a',
+      muted: '#66798b',
+      accent: '#2d75ad',
+      accent2: '#55b8a6',
+      accent3: '#f0b84d',
+      font: "'Inter', Arial, sans-serif",
+      display: "'Inter', Arial, sans-serif"
+    },
+    'creative-mode': {
+      bg: '#fff7ed',
+      surface: '#ffffff',
+      ink: '#2a2118',
+      muted: '#705f4f',
+      accent: '#f09131',
+      accent2: '#6d56d8',
+      accent3: '#1aa37a',
+      font: "'Inter', Arial, sans-serif",
+      display: "'Inter', Arial, sans-serif"
+    },
+    'long-table': {
+      bg: '#f2f5ef',
+      surface: '#ffffff',
+      ink: '#1f2a20',
+      muted: '#5e6b60',
+      accent: '#3d9f47',
+      accent2: '#315f9f',
+      accent3: '#c98d25',
+      font: "'Inter', Arial, sans-serif",
+      display: "'Inter', Arial, sans-serif"
+    }
+  };
+  return themes[template.id] || themes[template.slug] || themes['soft-editorial'];
+}
+
+function renderList(items) {
+  if (!items.length) return '';
+  return `<ul class="bullet-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+}
+
+function renderMetrics(metrics) {
+  if (!metrics.length) return '';
+  return `<div class="metric-grid">${metrics.map((item) => `
+    <div class="metric-card">
+      <span>${escapeHtml(item.label)}</span>
+      <strong>${escapeHtml(item.value)}</strong>
+      <em>${escapeHtml(item.note)}</em>
+    </div>
+  `).join('')}</div>`;
+}
+
+function renderSteps(steps, slideIndex) {
+  if (!steps.length) return '';
+  return `<div class="stepper" data-stepper="${slideIndex}">
+    <div class="step-buttons">${steps.map((step, index) => `<button type="button" class="${index === 0 ? 'active' : ''}" data-step="${index}">${escapeHtml(step.label)}</button>`).join('')}</div>
+    <div class="step-panels">${steps.map((step, index) => `
+      <article class="${index === 0 ? 'active' : ''}" data-panel="${index}">
+        <b>${escapeHtml(step.title)}</b>
+        <p>${escapeHtml(step.detail)}</p>
+      </article>
+    `).join('')}</div>
+  </div>`;
+}
+
+function renderDetails(details, slideIndex) {
+  if (!details.length) return '';
+  return `<div class="detail-module" data-detail-module="${slideIndex}">
+    <div class="detail-triggers">${details.map((detail, index) => `
+      <button type="button" class="detail-trigger ${index === 0 ? 'active' : ''}" data-detail="${index}" data-detail-type="${escapeHtml(detail.type)}">
+        <span>${String(index + 1).padStart(2, '0')}</span>
+        <b>${escapeHtml(detail.trigger)}</b>
+      </button>
+    `).join('')}</div>
+    <div class="detail-panels">${details.map((detail, index) => `
+      <article class="detail-panel ${index === 0 ? 'active' : ''}" data-detail-panel="${index}">
+        <small>${escapeHtml(detail.type)}</small>
+        <b>${escapeHtml(detail.title)}</b>
+        <p>${escapeHtml(detail.body)}</p>
+      </article>
+    `).join('')}</div>
+  </div>`;
+}
+
+function renderBeforeAfter(beforeAfter, slideIndex) {
+  if (!beforeAfter || (!beforeAfter.beforeBody && !beforeAfter.afterBody)) return '';
+  return `<div class="before-after" data-before-after="${slideIndex}" style="--split:50%">
+    <article class="ba-card ba-before">
+      <small>Before</small>
+      <b>${escapeHtml(beforeAfter.beforeTitle)}</b>
+      <p>${escapeHtml(beforeAfter.beforeBody)}</p>
+    </article>
+    <article class="ba-card ba-after">
+      <small>After</small>
+      <b>${escapeHtml(beforeAfter.afterTitle)}</b>
+      <p>${escapeHtml(beforeAfter.afterBody)}</p>
+    </article>
+    <input type="range" min="18" max="82" value="50" aria-label="Before after comparison">
+    <span class="ba-handle"></span>
+  </div>`;
+}
+
+function renderSegments(segments, slideIndex) {
+  if (!segments.length) return '';
+  return `<div class="segment-module" data-segments="${slideIndex}">
+    <div class="segment-tabs">${segments.map((segment, index) => `
+      <button type="button" class="${index === 0 ? 'active' : ''}" data-segment="${index}">${escapeHtml(segment.label)}</button>
+    `).join('')}</div>
+    <div class="segment-panels">${segments.map((segment, index) => `
+      <article class="${index === 0 ? 'active' : ''}" data-segment-panel="${index}">
+        <b>${escapeHtml(segment.title)}</b>
+        <p>${escapeHtml(segment.body)}</p>
+      </article>
+    `).join('')}</div>
+  </div>`;
+}
+
+function renderChart(chart) {
+  if (!chart.length) return '';
+  const max = Math.max(1, ...chart.map((item) => item.value));
+  return `<div class="bar-chart">${chart.map((item) => `
+    <div class="bar-row">
+      <span>${escapeHtml(item.label)}</span>
+      <div><i style="width:${Math.max(8, Math.round((item.value / max) * 100))}%"></i></div>
+      <b>${escapeHtml(item.value)}</b>
+    </div>
+  `).join('')}</div>`;
+}
+
+function renderChartDatasets(datasets, slideIndex) {
+  if (!datasets.length) return '';
+  return `<div class="chart-toggle" data-chart-toggle="${slideIndex}">
+    <div class="chart-tabs">${datasets.map((dataset, index) => `
+      <button type="button" class="${index === 0 ? 'active' : ''}" data-chart-dataset="${index}">${escapeHtml(dataset.label)}</button>
+    `).join('')}</div>
+    <div class="chart-toggle-panels">${datasets.map((dataset, index) => {
+      const max = Math.max(1, ...dataset.data.map((item) => item.value));
+      return `<article class="${index === 0 ? 'active' : ''}" data-chart-panel="${index}">
+        <div class="dataset-bars">${dataset.data.map((item) => `
+          <div class="bar-row">
+            <span>${escapeHtml(item.label)}</span>
+            <div><i style="width:${Math.max(8, Math.round((item.value / max) * 100))}%"></i></div>
+            <b>${escapeHtml(item.value)}</b>
+          </div>
+        `).join('')}</div>
+        ${dataset.insight ? `<p>${escapeHtml(dataset.insight)}</p>` : ''}
+      </article>`;
+    }).join('')}</div>
+  </div>`;
+}
+
+function renderSlide(slide, index) {
+  const revealItems = slide.reveals;
+  const body = [
+    renderList(slide.bullets),
+    renderMetrics(slide.metrics),
+    renderSteps(slide.steps, index),
+    renderDetails(slide.details, index),
+    renderBeforeAfter(slide.beforeAfter, index),
+    renderSegments(slide.segments, index),
+    revealItems.length ? `<div class="reveal-stack">${revealItems.map((item, revealIndex) => `<div class="reveal-item" data-reveal="${revealIndex}">${escapeHtml(item)}</div>`).join('')}</div>` : '',
+    renderChartDatasets(slide.chartDatasets, index),
+    renderChart(slide.chart)
+  ].filter(Boolean).join('\n');
+  return `<section class="slide ${index === 0 ? 'active visible' : ''}" data-layout="${escapeHtml(slide.layout)}">
+    <div class="slide-chrome">
+      <span>${escapeHtml(slide.kicker)}</span>
+      <span>${String(index + 1).padStart(2, '0')}</span>
+    </div>
+    <main class="slide-layout">
+      <div class="copy-block">
+        <p class="kicker">${escapeHtml(slide.kicker)}</p>
+        <h1>${escapeHtml(slide.title)}</h1>
+        ${slide.subtitle ? `<p class="subtitle">${escapeHtml(slide.subtitle)}</p>` : ''}
+        ${slide.callout ? `<div class="callout">${escapeHtml(slide.callout)}</div>` : ''}
+      </div>
+      <div class="visual-block">${body || '<div class="empty-visual">Ready for refinement</div>'}</div>
+    </main>
+    ${slide.speakerNote ? `<aside class="speaker-note">${escapeHtml(slide.speakerNote)}</aside>` : ''}
+  </section>`;
+}
+
+function renderDeckHtmlFromSpec(spec, template, artifactType) {
+  const theme = themeForTemplate(template);
+  const slides = spec.slides.map(renderSlide).join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(spec.title)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Albert+Sans:wght@400;500;600;700;900&family=Big+Shoulders+Display:wght@700;900&family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --stage-bg: ${theme.bg};
+      --slide-bg: ${theme.surface};
+      --ink: ${theme.ink};
+      --muted: ${theme.muted};
+      --accent: ${theme.accent};
+      --accent-2: ${theme.accent2};
+      --accent-3: ${theme.accent3};
+      --font: ${theme.font};
+      --display: ${theme.display};
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--stage-bg); color: var(--ink); font-family: var(--font); }
+    .deck-viewport { position: fixed; inset: 0; overflow: hidden; background: var(--stage-bg); }
+    .deck-stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; transform-origin: 0 0; background: var(--slide-bg); }
+    .slide { position: absolute; inset: 0; width: 1920px; height: 1080px; overflow: hidden; display: block; visibility: hidden; opacity: 0; pointer-events: none; background:
+      radial-gradient(circle at 12% 18%, color-mix(in srgb, var(--accent-2) 18%, transparent), transparent 28%),
+      linear-gradient(135deg, color-mix(in srgb, var(--slide-bg) 90%, var(--accent) 10%), var(--slide-bg)); padding: 72px; }
+    .slide.active, .slide.visible { visibility: visible; opacity: 1; pointer-events: auto; z-index: 1; }
+    .slide::after { content: ""; position: absolute; inset: 32px; border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); pointer-events: none; }
+    .slide-chrome { position: relative; z-index: 2; display: flex; justify-content: space-between; align-items: center; color: var(--muted); text-transform: uppercase; font-size: 24px; font-weight: 800; letter-spacing: 0; }
+    .slide-layout { position: relative; z-index: 2; height: 844px; display: grid; grid-template-columns: 0.92fr 1.08fr; gap: 72px; align-items: center; }
+    .copy-block h1 { margin: 0; font-family: var(--display); font-size: 104px; line-height: 0.94; letter-spacing: 0; max-width: 780px; }
+    .kicker { margin: 0 0 22px; color: var(--accent); text-transform: uppercase; font-weight: 900; font-size: 24px; letter-spacing: 0; }
+    .subtitle { margin: 28px 0 0; color: var(--muted); font-size: 34px; line-height: 1.28; max-width: 720px; }
+    .callout { margin-top: 34px; padding: 24px 28px; border-left: 10px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, white); font-size: 26px; line-height: 1.3; font-weight: 700; max-width: 720px; }
+    .visual-block { min-height: 610px; display: grid; align-content: center; gap: 26px; }
+    .bullet-list { display: grid; gap: 18px; margin: 0; padding: 0; list-style: none; }
+    .bullet-list li { padding: 22px 26px; background: rgba(255,255,255,0.72); border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent); font-size: 28px; line-height: 1.25; font-weight: 650; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+    .metric-card { min-height: 172px; padding: 26px; background: var(--ink); color: var(--slide-bg); display: grid; align-content: space-between; }
+    .metric-card span { color: color-mix(in srgb, var(--slide-bg) 70%, var(--accent-2)); font-size: 20px; text-transform: uppercase; font-weight: 800; }
+    .metric-card strong { font-size: 58px; line-height: 1; font-family: var(--display); }
+    .metric-card em { color: color-mix(in srgb, var(--slide-bg) 78%, transparent); font-style: normal; font-size: 20px; line-height: 1.25; }
+    .stepper { display: grid; grid-template-columns: 220px 1fr; gap: 22px; min-height: 330px; }
+    .step-buttons { display: grid; gap: 12px; align-content: start; }
+    .step-buttons button { border: 0; padding: 18px; background: rgba(255,255,255,0.72); color: var(--ink); font: 900 22px var(--font); cursor: pointer; }
+    .step-buttons button.active { background: var(--accent); color: white; }
+    .step-panels article { display: none; height: 100%; padding: 34px; background: rgba(255,255,255,0.78); border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent); }
+    .step-panels article.active { display: grid; align-content: center; }
+    .step-panels b { font-size: 44px; line-height: 1.05; font-family: var(--display); }
+    .step-panels p { margin: 18px 0 0; font-size: 28px; line-height: 1.3; color: var(--muted); }
+    .detail-module { display: grid; grid-template-columns: 280px 1fr; gap: 22px; min-height: 340px; }
+    .detail-triggers { display: grid; gap: 12px; align-content: start; }
+    .detail-trigger { border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); padding: 16px; background: rgba(255,255,255,0.66); color: var(--ink); text-align: left; cursor: pointer; display: grid; gap: 8px; }
+    .detail-trigger span { color: var(--accent); font: 900 16px var(--font); }
+    .detail-trigger b { font: 900 22px/1.08 var(--font); }
+    .detail-trigger.active { background: var(--ink); color: var(--slide-bg); transform: translateX(8px); }
+    .detail-panels { min-height: 340px; }
+    .detail-panel { display: none; height: 100%; padding: 34px; background: color-mix(in srgb, var(--accent-2) 12%, white); border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent); align-content: center; }
+    .detail-panel.active { display: grid; }
+    .detail-panel small { color: var(--accent); text-transform: uppercase; font-size: 18px; font-weight: 900; }
+    .detail-panel b { margin-top: 16px; font-size: 44px; line-height: 1.05; font-family: var(--display); }
+    .detail-panel p { margin: 20px 0 0; color: var(--muted); font-size: 28px; line-height: 1.3; }
+    .before-after { position: relative; min-height: 390px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); background: rgba(255,255,255,0.72); }
+    .ba-card { position: absolute; inset: 0; padding: 38px; display: grid; align-content: center; gap: 16px; }
+    .ba-before { background: color-mix(in srgb, var(--ink) 9%, white); clip-path: inset(0 calc(100% - var(--split)) 0 0); }
+    .ba-after { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, white), color-mix(in srgb, var(--accent-2) 16%, white)); clip-path: inset(0 0 0 var(--split)); }
+    .ba-card small { color: var(--accent); text-transform: uppercase; font-size: 18px; font-weight: 900; }
+    .ba-card b { font-family: var(--display); font-size: 50px; line-height: 1; }
+    .ba-card p { max-width: 560px; margin: 0; color: var(--muted); font-size: 27px; line-height: 1.28; }
+    .before-after input { position: absolute; inset: 0; z-index: 4; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; }
+    .ba-handle { position: absolute; z-index: 3; top: 0; bottom: 0; left: var(--split); width: 4px; background: var(--ink); box-shadow: 0 0 0 8px color-mix(in srgb, var(--slide-bg) 80%, transparent); }
+    .ba-handle::after { content: "< >"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 70px; height: 70px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: var(--slide-bg); font: 900 18px var(--font); }
+    .segment-module { display: grid; gap: 18px; min-height: 330px; }
+    .segment-tabs, .chart-tabs { display: flex; flex-wrap: wrap; gap: 10px; }
+    .segment-tabs button, .chart-tabs button { border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); padding: 14px 18px; background: rgba(255,255,255,0.66); color: var(--ink); font: 900 18px var(--font); cursor: pointer; }
+    .segment-tabs button.active, .chart-tabs button.active { background: var(--accent); color: white; border-color: var(--accent); }
+    .segment-panels article { display: none; min-height: 250px; padding: 32px; background: rgba(255,255,255,0.78); border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent); align-content: center; }
+    .segment-panels article.active { display: grid; }
+    .segment-panels b { font-family: var(--display); font-size: 48px; line-height: 1.02; }
+    .segment-panels p { margin: 18px 0 0; color: var(--muted); font-size: 28px; line-height: 1.3; }
+    .reveal-stack { display: grid; gap: 14px; }
+    .reveal-item { padding: 18px 22px; background: rgba(255,255,255,0.72); border-left: 8px solid var(--accent-3); color: var(--ink); font-size: 24px; line-height: 1.22; font-weight: 800; opacity: 0; transform: translateY(12px); transition: opacity 260ms ease, transform 260ms ease; }
+    .slide.active .reveal-item.revealed { opacity: 1; transform: translateY(0); }
+    .bar-chart { display: grid; gap: 18px; padding: 32px; background: rgba(255,255,255,0.78); }
+    .bar-row { display: grid; grid-template-columns: 210px 1fr 64px; gap: 18px; align-items: center; font-size: 22px; font-weight: 800; }
+    .bar-row div { height: 28px; background: color-mix(in srgb, var(--ink) 10%, transparent); }
+    .bar-row i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+    .chart-toggle { display: grid; gap: 16px; padding: 28px; background: rgba(255,255,255,0.78); }
+    .chart-toggle-panels article { display: none; gap: 18px; }
+    .chart-toggle-panels article.active { display: grid; }
+    .dataset-bars { display: grid; gap: 16px; }
+    .chart-toggle-panels p { margin: 0; color: var(--muted); font-size: 24px; line-height: 1.28; font-weight: 750; }
+    .speaker-note { position: absolute; z-index: 2; left: 72px; right: 72px; bottom: 48px; color: var(--muted); font-size: 20px; }
+    .empty-visual { min-height: 420px; display: grid; place-items: center; border: 1px dashed color-mix(in srgb, var(--ink) 18%, transparent); color: var(--muted); font-size: 28px; font-weight: 800; }
+    [data-layout="hero"] .slide-layout, [data-layout="closing"] .slide-layout { grid-template-columns: 1fr; align-content: center; }
+    [data-layout="hero"] .copy-block h1, [data-layout="closing"] .copy-block h1 { max-width: 1320px; font-size: 132px; }
+    [data-layout="hero"] .visual-block, [data-layout="closing"] .visual-block { grid-template-columns: 1fr 1fr; min-height: auto; }
+    .deck-controls { position: fixed; right: 22px; bottom: 18px; z-index: 20; display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: rgba(0,0,0,0.56); color: white; font: 700 13px var(--font); border-radius: 999px; }
+    .deck-controls button { width: 30px; height: 30px; border: 0; border-radius: 50%; color: white; background: rgba(255,255,255,0.16); cursor: pointer; }
+    .slide-agenda { position: fixed; right: 22px; top: 50%; transform: translateY(-50%); z-index: 22; display: grid; gap: 10px; }
+    .agenda-dot { position: relative; width: 12px; height: 12px; border: 0; border-radius: 50%; background: rgba(255,255,255,0.48); cursor: pointer; }
+    .agenda-dot.active { background: var(--accent); transform: scale(1.35); }
+    .agenda-dot::after { content: attr(data-title); position: absolute; right: 20px; top: 50%; transform: translateY(-50%); width: max-content; max-width: 260px; padding: 8px 10px; border-radius: 8px; background: rgba(0,0,0,0.74); color: white; font: 700 12px var(--font); opacity: 0; pointer-events: none; }
+    .agenda-dot:hover::after { opacity: 1; }
+    @media print { html, body { width: 1920px; height: auto; overflow: visible; background: #fff; } .deck-viewport, .deck-stage { position: static; transform: none !important; overflow: visible; } .slide { position: relative; display: block !important; visibility: visible !important; opacity: 1 !important; width: 1920px; height: 1080px; break-after: page; } .deck-controls { display: none !important; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.2s !important; } }
+  </style>
+</head>
+<body>
+  <div class="deck-viewport">
+    <div class="deck-stage" id="deckStage">
+      ${slides}
+    </div>
+  </div>
+  <div class="deck-controls">
+    <button type="button" id="prevSlide" aria-label="Previous slide">&lt;</button>
+    <span id="pageCounter">1 / ${spec.slides.length}</span>
+    <button type="button" id="nextSlide" aria-label="Next slide">&gt;</button>
+  </div>
+  <nav class="slide-agenda" aria-label="Slide agenda">
+    ${spec.slides.map((slide, index) => `<button type="button" class="agenda-dot ${index === 0 ? 'active' : ''}" data-agenda="${index}" data-title="${escapeHtml(slide.title)}" aria-label="Go to slide ${index + 1}: ${escapeHtml(slide.title)}"></button>`).join('\n    ')}
+  </nav>
+  <script>
+    const slides = Array.from(document.querySelectorAll('.slide'));
+    const stage = document.getElementById('deckStage');
+    const counter = document.getElementById('pageCounter');
+    const agendaDots = Array.from(document.querySelectorAll('[data-agenda]'));
+    let current = 0;
+    let revealIndex = 0;
+    function scaleStage() {
+      const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+      stage.style.transform = 'scale(' + scale + ')';
+      stage.style.left = ((window.innerWidth - 1920 * scale) / 2) + 'px';
+      stage.style.top = ((window.innerHeight - 1080 * scale) / 2) + 'px';
+    }
+    function revealItemsFor(index) {
+      return Array.from(slides[index]?.querySelectorAll('.reveal-item') || []);
+    }
+    function updateReveals() {
+      revealItemsFor(current).forEach((item, index) => item.classList.toggle('revealed', index < revealIndex));
+    }
+    function advanceReveal() {
+      const items = revealItemsFor(current);
+      if (revealIndex < items.length) {
+        revealIndex += 1;
+        updateReveals();
+        return true;
+      }
+      return false;
+    }
+    function show(index) {
+      current = Math.max(0, Math.min(slides.length - 1, index));
+      revealIndex = 0;
+      slides.forEach((slide, i) => slide.classList.toggle('active', i === current));
+      slides.forEach((slide, i) => slide.classList.toggle('visible', i === current));
+      slides.forEach((slide, i) => {
+        if (i !== current) slide.querySelectorAll('.reveal-item').forEach((item) => item.classList.remove('revealed'));
+      });
+      agendaDots.forEach((dot, i) => dot.classList.toggle('active', i === current));
+      counter.textContent = (current + 1) + ' / ' + slides.length;
+      updateReveals();
+    }
+    document.getElementById('prevSlide').addEventListener('click', () => show(current - 1));
+    document.getElementById('nextSlide').addEventListener('click', () => advanceReveal() || show(current + 1));
+    agendaDots.forEach((dot) => dot.addEventListener('click', () => show(Number(dot.dataset.agenda) || 0)));
+    window.addEventListener('resize', scaleStage);
+    window.addEventListener('keydown', (event) => {
+      if (['ArrowRight', 'PageDown', ' '].includes(event.key)) {
+        event.preventDefault();
+        advanceReveal() || show(current + 1);
+      }
+      if (['ArrowLeft', 'PageUp'].includes(event.key)) show(current - 1);
+    });
+    document.querySelectorAll('.stepper').forEach((stepper) => {
+      const buttons = Array.from(stepper.querySelectorAll('[data-step]'));
+      const panels = Array.from(stepper.querySelectorAll('[data-panel]'));
+      buttons.forEach((button) => button.addEventListener('click', () => {
+        const active = button.dataset.step;
+        buttons.forEach((item) => item.classList.toggle('active', item.dataset.step === active));
+        panels.forEach((item) => item.classList.toggle('active', item.dataset.panel === active));
+      }));
+    });
+    document.querySelectorAll('.detail-module').forEach((module) => {
+      const triggers = Array.from(module.querySelectorAll('[data-detail]'));
+      const panels = Array.from(module.querySelectorAll('[data-detail-panel]'));
+      triggers.forEach((trigger) => trigger.addEventListener('click', () => {
+        const active = trigger.dataset.detail;
+        triggers.forEach((item) => item.classList.toggle('active', item.dataset.detail === active));
+        panels.forEach((item) => item.classList.toggle('active', item.dataset.detailPanel === active));
+      }));
+    });
+    document.querySelectorAll('.before-after').forEach((module) => {
+      const input = module.querySelector('input[type="range"]');
+      if (!input) return;
+      const update = () => module.style.setProperty('--split', input.value + '%');
+      input.addEventListener('input', update);
+      update();
+    });
+    document.querySelectorAll('.segment-module').forEach((module) => {
+      const tabs = Array.from(module.querySelectorAll('[data-segment]'));
+      const panels = Array.from(module.querySelectorAll('[data-segment-panel]'));
+      tabs.forEach((tab) => tab.addEventListener('click', () => {
+        const active = tab.dataset.segment;
+        tabs.forEach((item) => item.classList.toggle('active', item.dataset.segment === active));
+        panels.forEach((item) => item.classList.toggle('active', item.dataset.segmentPanel === active));
+      }));
+    });
+    document.querySelectorAll('.chart-toggle').forEach((module) => {
+      const tabs = Array.from(module.querySelectorAll('[data-chart-dataset]'));
+      const panels = Array.from(module.querySelectorAll('[data-chart-panel]'));
+      tabs.forEach((tab) => tab.addEventListener('click', () => {
+        const active = tab.dataset.chartDataset;
+        tabs.forEach((item) => item.classList.toggle('active', item.dataset.chartDataset === active));
+        panels.forEach((item) => item.classList.toggle('active', item.dataset.chartPanel === active));
+      }));
+    });
+    scaleStage();
+    show(0);
+  </script>
+</body>
+</html>`;
+}
+
 function buildEditPrompt({ deck, currentHtml, instruction, currentPage, targetContext = '' }) {
   const compactHtml = currentHtml.length > 90000 ? currentHtml.slice(0, 90000) : currentHtml;
   const recentMessages = (deck.messages || []).slice(-10).map((message) => `${message.role}: ${message.text}`).join('\n');
@@ -972,6 +1770,7 @@ Rules:
 - If the user asks for a local/current-slide change, primarily edit slide ${currentPage || 1}.
 - Keep all CSS/JS inline and keep every slide as <section class="slide">.
 - Do not remove keyboard/touch navigation or the page counter.
+- Preserve existing interactive modules, chart toggles, walkthrough steppers, hotspot notes, and flow selectors unless the user explicitly asks to remove them.
 - No markdown fences or commentary.`,
     user: `Current user instruction:
 ${instruction}
@@ -1019,6 +1818,7 @@ Rules:
 - For text-only requests, search and replace the smallest exact text/HTML span.
 - For layout/style requests, edit the current slide section and/or inline CSS with exact search/replace.
 - Preserve fixed 1920x1080 stage rules and every <section class="slide">.
+- Preserve existing JavaScript interactions, chart states, walkthrough controls, flow selectors, and navigation runtime unless the instruction explicitly targets them.
 - Do not return a complete HTML document unless JSON patching is impossible.`,
     user: `Instruction:
 ${instruction}
@@ -1069,24 +1869,23 @@ function applySearchReplaceEdits(currentHtml, patch) {
   return { html, summary: patch.summary || 'Applied the requested edit.', applied };
 }
 
-async function generateDeckHtml({ prompt, template, modelConfig, onProgress = async () => {} }) {
-  await onProgress('Loading template assets', `Reading ${template.name} rules and Slide Studio runtime files.`);
-  const viewportBase = readTextFile(path.join(FRONTEND_SLIDES_DIR, 'viewport-base.css'), FALLBACK_VIEWPORT_BASE);
-  const htmlTemplate = readTextFile(path.join(FRONTEND_SLIDES_DIR, 'html-template.md'), FALLBACK_HTML_TEMPLATE);
-  const animationPatterns = readTextFile(path.join(FRONTEND_SLIDES_DIR, 'animation-patterns.md'), FALLBACK_ANIMATION_PATTERNS);
+async function generateDeckHtml({ prompt, template, artifactType, modelConfig, onProgress = async () => {} }) {
+  await onProgress('Loading template assets', `Reading a compact ${template.name} design recipe.`);
   const designMd = readTextFile(path.join(TEMPLATE_DIR, template.slug, 'design.md'), FALLBACK_DESIGN_MD);
-  await onProgress('Building generation prompt', 'Combining your request with the selected visual system and HTML requirements.');
-  const generationPrompt = buildGenerationPrompt({ prompt, template, viewportBase, htmlTemplate, animationPatterns, designMd });
-  await onProgress('Calling the model', `Requesting a complete HTML deck from ${modelConfig.provider} / ${modelConfig.model}.`, 'active');
+  await onProgress('Building artifact brief', `Combining your request, ${artifactType.name}, and a compact visual recipe.`);
+  const generationPrompt = buildGenerationPrompt({ prompt, template, artifactType, designMd });
+  await onProgress('Calling the model', `Requesting a structured deck design from ${modelConfig.provider} / ${modelConfig.model}.`, 'active');
   const raw = await callChatCompletions({
     modelConfig,
+    maxTokens: GENERATION_MAX_TOKENS,
     messages: [
       { role: 'system', content: generationPrompt.system },
       { role: 'user', content: generationPrompt.user }
     ]
   });
-  await onProgress('Validating generated HTML', 'Checking that the model returned a complete fixed-stage slide document.');
-  return extractHtml(raw);
+  await onProgress('Rendering HTML artifact', 'Composing the structured design into a complete fixed-stage HTML deck.');
+  const spec = normalizeDeckSpec(parseJsonObject(raw), prompt, artifactType);
+  return extractHtml(renderDeckHtmlFromSpec(spec, template, artifactType));
 }
 
 async function editDeckHtml({ deck, instruction, currentPage, modelConfig }) {
@@ -1098,6 +1897,7 @@ async function editDeckHtml({ deck, instruction, currentPage, modelConfig }) {
   try {
     const rawPatch = await callChatCompletions({
       modelConfig,
+      maxTokens: 2500,
       messages: [
         { role: 'system', content: patchPrompt.system },
         { role: 'user', content: patchPrompt.user }
@@ -1111,6 +1911,7 @@ async function editDeckHtml({ deck, instruction, currentPage, modelConfig }) {
     try {
       const raw = await callChatCompletions({
         modelConfig,
+        maxTokens: EDIT_MAX_TOKENS,
         messages: [
           { role: 'system', content: editPrompt.system },
           { role: 'user', content: editPrompt.user }
@@ -1247,14 +2048,17 @@ function seedDemoData() {
 
 async function runDeckGeneration({ db, user, deck, template }) {
   const modelConfig = getServerModelConfig();
+  const targetContext = parseTargetContext(deck.targetContext);
+  const artifactType = getArtifactType(targetContext.artifactTypeId);
   addDeckProgress(db, deck, 'Checking model configuration', 'Confirming the server has an OpenAI-compatible model configured.');
   const html = await generateDeckHtml({
     prompt: deck.prompt,
     template,
+    artifactType,
     modelConfig,
     onProgress: async (title, detail, status) => addDeckProgress(db, deck, title, detail, status)
   });
-  addDeckProgress(db, deck, 'Writing presentation file', 'Saving the generated HTML deck into the project workspace.');
+  addDeckProgress(db, deck, 'Writing presentation file', 'Saving the generated HTML artifact into the project workspace.');
   const userDir = path.join(GENERATED_DIR, user.id);
   fs.mkdirSync(userDir, { recursive: true });
   const filePath = path.join(userDir, `${deck.id}.html`);
@@ -1276,10 +2080,10 @@ async function runDeckGeneration({ db, user, deck, template }) {
   }
   if (!deck.messages.some((message) => message.role === 'assistant')) {
     deck.messages.push(
-      { id: crypto.randomUUID(), role: 'assistant', text: `Generated a real HTML deck with ${template.name}.`, createdAt: deck.updatedAt }
+      { id: crypto.randomUUID(), role: 'assistant', text: `Generated a real HTML ${artifactType.name.toLowerCase()} artifact with ${template.name}.`, createdAt: deck.updatedAt }
     );
   }
-  addDeckProgress(db, deck, 'Ready to deliver', 'The deck is complete. Open the delivered artifact to edit, regenerate, or export PDF.');
+  addDeckProgress(db, deck, 'Ready to deliver', 'The artifact is complete. Open it to edit, regenerate, or export PDF.');
   writeDb(db);
   return deck;
 }
@@ -1335,7 +2139,7 @@ function createApiRouter() {
   });
 
   router.get('/templates', (req, res) => {
-    res.json({ templates });
+    res.json({ templates, artifactTypes });
   });
 
   router.get('/me', (req, res) => {
@@ -1344,8 +2148,10 @@ function createApiRouter() {
     res.json({ user: publicUser(user), quota: usageSummaryForUser(db, user, req) });
   });
 
-  router.post('/signup', (req, res) => {
+  router.post('/signup', async (req, res) => {
     const db = readDb();
+    const currentUser = getUser(req, db);
+    const pendingGuestUserId = currentUser?.isGuest ? currentUser.id : '';
     const email = String(req.body.email || '').trim().toLowerCase();
     const name = String(req.body.name || '').trim() || email.split('@')[0];
     const password = String(req.body.password || '');
@@ -1364,13 +2170,22 @@ function createApiRouter() {
       isGuest: false
     };
     db.users.push(newUser);
-    const verificationLink = createEmailVerification(db, newUser);
+    const verificationLink = createEmailVerification(db, newUser, { pendingGuestUserId });
     const token = crypto.randomBytes(32).toString('hex');
     db.sessions[token] = { userId: newUser.id, createdAt: new Date().toISOString() };
     writeDb(db);
     setSessionCookie(res, token);
-    logEvent('info', 'User signed up; email verification link created', { email, verificationLink });
-    res.json({ user: publicUser(newUser), requiresVerification: true, verificationLink });
+    const verificationEmail = await sendVerificationEmail(newUser, verificationLink).catch((error) => {
+      logEvent('error', 'Verification email delivery failed', { email, message: error.message });
+      return createVerificationEmailPreview(newUser, verificationLink);
+    });
+    logEvent('info', 'User signed up; email verification link created', { email, verificationLink, delivery: verificationEmail.delivery, pendingGuestUserId });
+    res.json({
+      user: publicUser(newUser),
+      requiresVerification: true,
+      verificationLink,
+      verificationEmail
+    });
   });
 
   router.get('/verify-email', (req, res) => {
@@ -1382,17 +2197,64 @@ function createApiRouter() {
     const user = db.users.find((item) => item.id === entry.userId);
     if (!user) return res.status(404).send('User not found.');
     entry.usedAt = new Date().toISOString();
+    let migratedDecks = 0;
     if (!user.emailVerifiedAt) {
       user.emailVerifiedAt = entry.usedAt;
       user.credits = Number(user.credits || 0) + QUOTAS.verifiedSignupCredits;
+      migratedDecks = mergeGuestProjectsIntoUser(db, entry.pendingGuestUserId, user).decks;
     }
     writeDb(db);
-    logEvent('info', 'Email verified', { email: user.email, credits: user.credits });
-    res.send(`Email verified. ${QUOTAS.verifiedSignupCredits} credits have been added. You can return to Slide Studio.`);
+    logEvent('info', 'Email verified', { email: user.email, credits: user.credits, migratedDecks });
+    const verifiedReturnUrl = `${APP_BASE_URL}?verified=1&migrated=${encodeURIComponent(String(migratedDecks))}`;
+    res.send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Email verified</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #25231f; background: #f7f5ef; }
+    main { width: min(440px, calc(100vw - 32px)); padding: 28px; background: #fff; border: 1px solid #e8e1d5; border-radius: 8px; box-shadow: 0 20px 60px rgba(42, 42, 35, 0.1); }
+    h1 { margin: 0 0 10px; font-size: 26px; letter-spacing: 0; }
+    p { margin: 0 0 18px; color: #625f58; line-height: 1.5; }
+    a { display: inline-flex; align-items: center; height: 42px; padding: 0 16px; color: #fff; background: #17614f; border-radius: 8px; font-weight: 800; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Email verified</h1>
+    <p>${escapeHtml(QUOTAS.verifiedSignupCredits)} credits have been added to ${escapeHtml(user.email)}.${migratedDecks ? ` ${escapeHtml(migratedDecks)} trial project${migratedDecks === 1 ? '' : 's'} have been saved to this account.` : ''} You can return to Slide Studio and start generating.</p>
+    <a href="${escapeHtml(verifiedReturnUrl)}">Return to Slide Studio</a>
+  </main>
+  <script>setTimeout(() => { window.location.href = ${JSON.stringify(verifiedReturnUrl)}; }, 2200);</script>
+</body>
+</html>`);
   });
 
-  router.post('/login', (req, res) => {
+  router.post('/resend-verification', async (req, res) => {
     const db = readDb();
+    const user = getUser(req, db);
+    if (!user || user.isGuest) return res.status(401).json({ error: 'Please log in before verifying email.' });
+    if (user.emailVerifiedAt) return res.json({ user: publicUser(user), alreadyVerified: true });
+    const verificationLink = createEmailVerification(db, user);
+    writeDb(db);
+    const verificationEmail = await sendVerificationEmail(user, verificationLink).catch((error) => {
+      logEvent('error', 'Verification email resend delivery failed', { email: user.email, message: error.message });
+      return createVerificationEmailPreview(user, verificationLink);
+    });
+    logEvent('info', 'Verification email resent', { email: user.email, verificationLink, delivery: verificationEmail.delivery });
+    res.json({
+      user: publicUser(user),
+      requiresVerification: true,
+      verificationLink,
+      verificationEmail
+    });
+  });
+
+  router.post('/login', async (req, res) => {
+    const db = readDb();
+    const currentUser = getUser(req, db);
+    const pendingGuestUserId = currentUser?.isGuest ? currentUser.id : '';
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const found = db.users.find((item) => item.email === email);
@@ -1403,11 +2265,24 @@ function createApiRouter() {
 
     const token = crypto.randomBytes(32).toString('hex');
     db.sessions[token] = { userId: found.id, createdAt: new Date().toISOString() };
-    const verificationLink = found.emailVerifiedAt ? '' : createEmailVerification(db, found);
+    const migration = found.emailVerifiedAt ? mergeGuestProjectsIntoUser(db, pendingGuestUserId, found) : { decks: 0 };
+    const verificationLink = found.emailVerifiedAt ? '' : createEmailVerification(db, found, { pendingGuestUserId });
     writeDb(db);
     setSessionCookie(res, token);
-    logEvent('info', 'User logged in', { email });
-    res.json({ user: publicUser(found), requiresVerification: Boolean(verificationLink), verificationLink });
+    const verificationEmail = verificationLink
+      ? await sendVerificationEmail(found, verificationLink).catch((error) => {
+        logEvent('error', 'Login verification email delivery failed', { email, message: error.message });
+        return createVerificationEmailPreview(found, verificationLink);
+      })
+      : null;
+    logEvent('info', 'User logged in', { email, delivery: verificationEmail?.delivery || '', pendingGuestUserId, migratedDecks: migration.decks });
+    res.json({
+      user: publicUser(found),
+      requiresVerification: Boolean(verificationLink),
+      verificationLink,
+      verificationEmail,
+      migratedDecks: migration.decks
+    });
   });
 
   router.post('/logout', (req, res) => {
@@ -1426,6 +2301,7 @@ function createApiRouter() {
     const template = (!user || user.isGuest) && !BASIC_TRIAL_TEMPLATE_IDS.has(requestedTemplate.id)
       ? templates.find((item) => BASIC_TRIAL_TEMPLATE_IDS.has(item.id)) || requestedTemplate
       : requestedTemplate;
+    const artifactType = getArtifactType(req.body.artifactTypeId);
     const prompt = String(req.body.prompt || '').trim();
     if (!prompt) {
       logEvent('error', 'Generate failed: empty prompt', { userId: user?.id || 'guest' });
@@ -1439,12 +2315,13 @@ function createApiRouter() {
     const deck = {
       id: crypto.randomUUID(),
       userId: user.id,
-      prompt: user.isGuest ? `${prompt}\n\nTrial constraint: create a concise basic deck with no more than 5 slides.` : prompt,
+      prompt: user.isGuest ? `${prompt}\n\nTrial constraint: create a concise basic presentation artifact with no more than 5 slides.` : prompt,
       templateId: template.id,
       templateSlug: template.slug,
       title: prompt.slice(0, 56),
       deckPath: '',
       status: 'generating',
+      targetContext: JSON.stringify({ artifactTypeId: artifactType.id }),
       createdAt: new Date().toISOString(),
       completedAt: '',
       error: '',
@@ -1454,9 +2331,9 @@ function createApiRouter() {
       ]
     };
     db.decks.unshift(deck);
-    addDeckProgress(db, deck, 'Queued generation task', 'Created a deck job and handed it to the server worker.');
+    addDeckProgress(db, deck, 'Queued generation task', `Created a ${artifactType.name.toLowerCase()} artifact job and handed it to the server worker.`);
     writeDb(db);
-    logEvent('info', 'Deck generation started', { userId: user.id, templateId: template.id, deckId: deck.id });
+    logEvent('info', 'Deck generation started', { userId: user.id, templateId: template.id, artifactTypeId: artifactType.id, deckId: deck.id });
     if (req.body.async) {
       startDeckGenerationJob(deck.id);
       return res.status(202).json({ deck: publicDeck(deck), user: publicUser(user), quota: usageSummaryForUser(db, user, req) });

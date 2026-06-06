@@ -84,7 +84,7 @@
                     <div class="brand-mark">S</div>
                     <div>
                         <div class="crumb">Slide Studio</div>
-                        <span>AI slide maker</span>
+                        <span>Presentation artifact studio</span>
                     </div>
                 </div>
                 <div class="account-pill">
@@ -95,21 +95,25 @@
 
             <section class="home-hero">
                 <div class="hero-copy">
-                    <h1>How can I help you today?</h1>
-                    <p>Build polished HTML slides from a prompt and a selected visual template.</p>
+                    <h1>What artifact should we build?</h1>
+                    <p>Turn a complex idea into an interactive HTML presentation with narrative, data, flow, and delivery built in.</p>
                 </div>
 
                 <section class="composer" aria-label="Slide generation composer">
                     <div class="composer-input-row">
-                        <textarea id="promptInput" placeholder="Create a 10-page product launch deck about an AI creation tool"></textarea>
+                        <textarea id="promptInput" placeholder="Create a product walkthrough for an AI creation tool, with a workflow demo, benchmark chart, and founder pitch narrative"></textarea>
                         <button class="send-btn" id="generateBtn" type="button" title="Generate">↑</button>
+                    </div>
+                    <div class="artifact-picker" aria-label="Artifact type">
+                        <span>Artifact type</span>
+                        <div class="artifact-options" id="artifactOptions"></div>
                     </div>
                     <div class="composer-footer">
                         <div class="composer-tools">
                             <button class="icon-btn" type="button" title="Attach file">＋</button>
                             <button class="icon-btn" type="button" title="Workflow">⌘</button>
                             <button class="icon-btn" type="button" title="Fast mode">ϟ</button>
-                            <button class="mode-chip active" type="button">Slides</button>
+                            <button class="mode-chip active" type="button">Artifact</button>
                             <button class="mode-chip" type="button">PowerPoint</button>
                             <button class="mode-chip" type="button">Frontend (HTML)</button>
                         </div>
@@ -118,11 +122,12 @@
                         <span>No template selected</span>
                     </div>
                     <div class="quota-status" id="quotaStatus"></div>
+                    <div class="email-verification-panel hidden" id="emailVerificationPanel"></div>
                     <div class="generation-status hidden" id="generationStatus">
                         <span class="status-spinner"></span>
                         <div>
-                            <strong id="generationStatusTitle">Generating slides</strong>
-                            <span id="generationStatusDetail">Reading template rules and generating your deck.</span>
+                            <strong id="generationStatusTitle">Generating artifact</strong>
+                            <span id="generationStatusDetail">Reading template rules and building your interactive presentation.</span>
                         </div>
                         <button class="retry-btn hidden" id="retryGenerateBtn" type="button">Retry</button>
                     </div>
@@ -163,7 +168,7 @@
             <section class="delivery-shell">
                 <section class="delivery-chat">
                     <header class="delivery-task-head">
-                        <h1 id="deliveryPrompt">Create a slide deck.</h1>
+                        <h1 id="deliveryPrompt">Create a presentation artifact.</h1>
                         <span id="deliveryStatusPill">Generating</span>
                     </header>
 
@@ -201,7 +206,7 @@
                 <div class="workspace-head">
                     <div>
                         <strong id="deckTitle">Generated deck</strong>
-                        <span id="deckMeta">HTML Slides</span>
+                        <span id="deckMeta">HTML Artifact</span>
                     </div>
                 </div>
                 <div class="chat-log" id="chatLog"></div>

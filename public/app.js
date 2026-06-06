@@ -4,6 +4,7 @@ const state = {
   selectedTemplateId: null,
   activeDeck: null,
   recentDecks: [],
+  selectedArtifactTypeId: 'product-walkthrough',
   currentPage: 1,
   totalPages: 1,
   annotate: false,
@@ -17,10 +18,53 @@ const state = {
   pendingAnnotation: null,
   errors: [],
   quota: null,
-  verificationLink: ''
+  verificationLink: '',
+  verificationEmail: null
 };
 
+const artifactTypes = [
+  {
+    id: 'product-walkthrough',
+    name: 'Product walkthrough',
+    description: 'Demo states, user flow, value proof'
+  },
+  {
+    id: 'startup-pitch',
+    name: 'Startup pitch',
+    description: 'Narrative, wedge, traction, roadmap'
+  },
+  {
+    id: 'ai-project-showcase',
+    name: 'AI project showcase',
+    description: 'Workflow, architecture, evals, outcomes'
+  },
+  {
+    id: 'technical-proposal',
+    name: 'Technical proposal',
+    description: 'System flow, tradeoffs, rollout plan'
+  },
+  {
+    id: 'data-story',
+    name: 'Data story',
+    description: 'Metrics, comparisons, interactive charts'
+  },
+  {
+    id: 'sales-narrative',
+    name: 'Sales narrative',
+    description: 'Pain, proof, demo, close plan'
+  }
+];
+
 const $ = (selector) => document.querySelector(selector);
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function getDeviceId() {
   const key = 'slideStudioDeviceId';
@@ -129,6 +173,7 @@ function setUser(user) {
     $('#sidebarAccountEmail').textContent = 'Local workspace';
     $('#logoutBtn').textContent = 'Sign in';
     renderQuota();
+    renderEmailVerificationPanel();
     show('homeView');
     return;
   }
@@ -138,6 +183,7 @@ function setUser(user) {
   $('#sidebarAccountEmail').textContent = user.email || 'Local workspace';
   $('#logoutBtn').textContent = user.isGuest ? 'Sign in' : 'Logout';
   renderQuota();
+  renderEmailVerificationPanel();
   show('homeView');
   loadDecks();
 }
@@ -145,6 +191,7 @@ function setUser(user) {
 function setQuota(quota) {
   state.quota = quota || null;
   renderQuota();
+  renderEmailVerificationPanel();
 }
 
 function renderQuota() {
@@ -161,6 +208,77 @@ function renderQuota() {
     return;
   }
   node.innerHTML = `<strong>${state.user.plan === 'paid' ? 'Paid plan' : 'Free credits'}</strong><span>${state.user.plan === 'paid' ? 'Higher limits enabled.' : `${state.user.credits} generations remaining.`}</span>`;
+}
+
+function rememberVerificationPayload(payload = {}) {
+  state.verificationLink = payload.verificationLink || state.verificationLink || '';
+  state.verificationEmail = payload.verificationEmail || (state.verificationLink ? {
+    to: state.user?.email || $('#emailInput')?.value || '',
+    gmailUrl: 'https://mail.google.com/mail/u/0/#inbox',
+    verificationLink: state.verificationLink
+  } : state.verificationEmail);
+  renderEmailVerificationPanel();
+}
+
+function renderEmailVerificationPanel() {
+  const panel = $('#emailVerificationPanel');
+  if (!panel) return;
+  if (!state.user || state.user.isGuest || state.user.emailVerified) {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+    return;
+  }
+
+  const email = state.verificationEmail?.to || state.user.email || 'your Gmail inbox';
+  const gmailUrl = state.verificationEmail?.gmailUrl || 'https://mail.google.com/mail/u/0/#inbox';
+  const verificationLink = state.verificationEmail?.verificationLink || state.verificationLink;
+  panel.classList.remove('hidden');
+  panel.innerHTML = `
+    <div class="email-steps">
+      <div class="email-step active"><span>1</span><strong>Enter Gmail</strong></div>
+      <div class="email-step active"><span>2</span><strong>Check inbox</strong></div>
+      <div class="email-step"><span>3</span><strong>Confirm credits</strong></div>
+    </div>
+    <div class="email-copy">
+      <strong>Verification email sent</strong>
+      <span>Open Gmail for ${escapeHtml(email)}, click the Slide Studio verification email, then come back here to confirm your credits.</span>
+    </div>
+    <div class="email-actions">
+      <a class="email-primary" href="${escapeHtml(gmailUrl)}" target="_blank" rel="noreferrer">Open Gmail</a>
+      <button type="button" id="refreshVerificationBtn">I clicked verify</button>
+      <button type="button" id="resendVerificationBtn">Resend</button>
+    </div>
+    ${verificationLink ? `<div class="email-dev-note">Local preview: <a href="${escapeHtml(verificationLink)}" target="_blank" rel="noreferrer">open verification email</a></div>` : ''}
+  `;
+}
+
+async function refreshVerificationStatus() {
+  try {
+    const { user, quota } = await api('/api/me');
+    setUser(user);
+    setQuota(quota);
+    if (user?.emailVerified) {
+      state.verificationLink = '';
+      state.verificationEmail = null;
+      renderEmailVerificationPanel();
+      toast('Email verified. Credits are ready.');
+    } else {
+      toast('Still waiting for verification. Check Gmail and click the email button first.');
+    }
+  } catch (error) {
+    reportIssue(error.message || 'Could not refresh verification status.', 'Email verification');
+  }
+}
+
+async function resendVerificationEmail() {
+  try {
+    const payload = await api('/api/resend-verification', { method: 'POST' });
+    setUser(payload.user);
+    rememberVerificationPayload(payload);
+    toast(payload.alreadyVerified ? 'Email is already verified.' : 'Verification email sent again.');
+  } catch (error) {
+    reportIssue(error.message || 'Could not resend verification email.', 'Email verification');
+  }
 }
 
 function setRailActive(action) {
@@ -196,6 +314,28 @@ function renderDeckList() {
       item.addEventListener('click', () => openDeckById(item.dataset.deckId));
     });
   });
+}
+
+function renderArtifactTypes() {
+  const node = $('#artifactOptions');
+  if (!node) return;
+  node.innerHTML = artifactTypes.map((type) => `
+    <button class="artifact-option ${state.selectedArtifactTypeId === type.id ? 'active' : ''}" type="button" data-artifact-type="${type.id}">
+      <strong>${type.name}</strong>
+      <span>${type.description}</span>
+    </button>
+  `).join('');
+  node.querySelectorAll('[data-artifact-type]').forEach((button) => {
+    button.addEventListener('click', () => selectArtifactType(button.dataset.artifactType));
+  });
+}
+
+function selectArtifactType(id) {
+  if (!artifactTypes.some((type) => type.id === id)) return;
+  state.selectedArtifactTypeId = id;
+  renderArtifactTypes();
+  const selected = artifactTypes.find((type) => type.id === id);
+  toast(`${selected.name} artifact selected.`);
 }
 
 async function loadDecks() {
@@ -239,7 +379,7 @@ function renderTemplates(category = 'All templates') {
           <div class="template-name">${template.name}</div>
           <div class="template-category">${template.category}</div>
         </div>
-        <div class="template-meta"><span class="template-tag">HTML Slides</span><span>${template.uses.toLocaleString()} uses</span></div>
+        <div class="template-meta"><span class="template-tag">HTML Artifact</span><span>${template.uses.toLocaleString()} uses</span></div>
       </div>
     </button>
   `).join('');
@@ -277,8 +417,8 @@ function setGenerateState(active) {
     $('#retryGenerateBtn').classList.add('hidden');
     $('#generationStatus').classList.remove('hidden');
     $('#generationStatus').classList.remove('failed');
-    $('#generationStatusTitle').textContent = 'Generating real HTML slides';
-    $('#generationStatusDetail').textContent = 'Reading template rules, generating the deck, then saving a preview file.';
+    $('#generationStatusTitle').textContent = 'Generating interactive HTML artifact';
+    $('#generationStatusDetail').textContent = 'Planning narrative, data, flow, walkthrough, and a browser-native presentation file.';
   } else if (!$('#generationStatus').classList.contains('failed')) {
     $('#generationStatus').classList.add('hidden');
   }
@@ -366,7 +506,7 @@ function stopDeliveryTimers() {
 
 function renderDelivery(deck) {
   state.deliveryDeck = deck;
-  $('#deliveryPrompt').textContent = deck?.prompt || 'Create a slide deck.';
+  $('#deliveryPrompt').textContent = deck?.prompt || 'Create a presentation artifact.';
   $('#deliveryDeckName').textContent = deck?.title || 'Generating deck';
   $('#deliveryStatusPill').textContent = deck?.status === 'complete' ? 'Ready' : deck?.status === 'failed' ? 'Failed' : 'Generating';
   $('#deliveryStatusPill').classList.toggle('failed', deck?.status === 'failed');
@@ -487,7 +627,7 @@ async function generateDeck() {
   const userPrompt = $('#promptInput').value.trim();
   if (!userPrompt) {
     $('#promptInput').focus();
-    toast('先输入你想做什么 slides，例如：做一个 10 页 AI 创作工具产品发布会。');
+    toast('先输入你想做什么 artifact，例如：做一个 AI 产品 walkthrough，包含流程、数据和 demo。');
     return;
   }
   if (!state.selectedTemplateId && state.templates[0]) {
@@ -498,7 +638,7 @@ async function generateDeck() {
   try {
     const { deck, user, quota } = await api('/api/generate', {
       method: 'POST',
-      body: { prompt: userPrompt, templateId: state.selectedTemplateId, async: true }
+      body: { prompt: userPrompt, templateId: state.selectedTemplateId, artifactTypeId: state.selectedArtifactTypeId, async: true }
     });
     if (user) setUser(user);
     setQuota(quota);
@@ -539,7 +679,7 @@ function openWorkspace(deck) {
   $('#workspaceView').classList.remove('preview-closed');
   const template = state.templates.find((item) => item.id === deck.templateId);
   $('#deckTitle').textContent = deck.title;
-  $('#deckMeta').textContent = `${template?.name || 'Template'} · ${deck.status || 'complete'} · HTML Slides`;
+  $('#deckMeta').textContent = `${template?.name || 'Template'} · ${deck.status || 'complete'} · HTML Artifact`;
   $('#slideFrame').src = cacheBust(deck.deckPath, deck.updatedAt);
   renderMessages(deck);
   renderAnnotations(deck);
@@ -583,6 +723,16 @@ async function restoreRoute() {
   if (route === 'deck' && id) {
     await openDeckById(id);
   }
+}
+
+function handleVerificationReturn() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('verified') !== '1') return;
+  const migrated = Number(params.get('migrated') || 0);
+  toast(migrated > 0
+    ? `Email verified. ${migrated} trial project${migrated === 1 ? '' : 's'} saved to this account.`
+    : 'Email verified. Credits are ready.');
+  history.replaceState(history.state, '', `${window.location.pathname}${window.location.hash}`);
 }
 
 function syncPreviewPage() {
@@ -734,7 +884,7 @@ async function submitDeckEdit(text) {
       body: { text: instruction, currentPage: state.currentPage }
     });
     state.activeDeck = deck;
-    $('#deckMeta').textContent = `${state.templates.find((item) => item.id === deck.templateId)?.name || 'Template'} · ${deck.status || 'complete'} · HTML Slides`;
+    $('#deckMeta').textContent = `${state.templates.find((item) => item.id === deck.templateId)?.name || 'Template'} · ${deck.status || 'complete'} · HTML Artifact`;
     renderMessages(deck);
     $('#slideFrame').src = cacheBust(deck.deckPath, deck.updatedAt);
     await loadDecks();
@@ -852,16 +1002,19 @@ async function init() {
     $('#authError').textContent = '';
     $('#verificationLink').classList.add('hidden');
     try {
-      const { user, verificationLink } = await api('/api/login', {
+      const payload = await api('/api/login', {
         method: 'POST',
         body: { email: $('#emailInput').value, password: $('#passwordInput').value }
       });
+      const { user, verificationLink } = payload;
       setUser(user);
       if (verificationLink) {
-        state.verificationLink = verificationLink;
-        $('#verificationLink').innerHTML = `Verification email link for this MVP: <a href="${verificationLink}" target="_blank" rel="noreferrer">verify email</a>`;
+        rememberVerificationPayload(payload);
+        $('#verificationLink').innerHTML = `Verification email sent. Open Gmail, click the confirmation button, then return here.`;
         $('#verificationLink').classList.remove('hidden');
-        toast('Verify your email to receive credits.');
+        toast('Verification email sent. Open Gmail to confirm.');
+      } else if (payload.migratedDecks) {
+        toast(`${payload.migratedDecks} trial project${payload.migratedDecks === 1 ? '' : 's'} saved to this account.`);
       }
     } catch (error) {
       $('#authError').textContent = error.message;
@@ -873,16 +1026,17 @@ async function init() {
     $('#authError').textContent = '';
     $('#verificationLink').classList.add('hidden');
     try {
-      const { user, verificationLink } = await api('/api/signup', {
+      const payload = await api('/api/signup', {
         method: 'POST',
         body: { name: $('#nameInput').value, email: $('#emailInput').value, password: $('#passwordInput').value }
       });
+      const { user, verificationLink } = payload;
       setUser(user);
       if (verificationLink) {
-        state.verificationLink = verificationLink;
-        $('#verificationLink').innerHTML = `Verification email link for this MVP: <a href="${verificationLink}" target="_blank" rel="noreferrer">verify email</a>`;
+        rememberVerificationPayload(payload);
+        $('#verificationLink').innerHTML = `Verification email sent. Open Gmail, click the confirmation button, then return here.`;
         $('#verificationLink').classList.remove('hidden');
-        toast('Account created. Verify your email to receive credits.');
+        toast('Account created. Open Gmail to receive credits.');
       }
     } catch (error) {
       $('#authError').textContent = error.message;
@@ -918,6 +1072,11 @@ async function init() {
     } else {
       show('authView');
     }
+  });
+
+  $('#emailVerificationPanel').addEventListener('click', (event) => {
+    if (event.target.closest('#refreshVerificationBtn')) refreshVerificationStatus();
+    if (event.target.closest('#resendVerificationBtn')) resendVerificationEmail();
   });
 
   let suppressSidebarPeek = false;
@@ -986,9 +1145,9 @@ async function init() {
   });
 
   $('#blankDeckBtn').addEventListener('click', () => {
-    $('#promptInput').value = 'Create a clean blank HTML slide deck for a product strategy presentation.';
+    $('#promptInput').value = 'Create a clean starter HTML presentation artifact for a product strategy narrative, with a clickable workflow, comparison data, and delivery-ready structure.';
     $('#generateBtn').classList.add('ready');
-    toast('Blank deck prompt added.');
+    toast('Starter artifact prompt added.');
     $('#promptInput').focus();
   });
 
@@ -1147,9 +1306,11 @@ async function init() {
     api('/api/templates')
   ]);
   state.templates = templateData.templates;
+  renderArtifactTypes();
   renderTemplates();
   setQuota(quota);
   setUser(user);
+  handleVerificationReturn();
   await restoreRoute();
   window.addEventListener('popstate', restoreRoute);
 }

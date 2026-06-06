@@ -362,6 +362,114 @@ body.sidebar-pinned .sidebar {
     font-weight: 800;
 }
 
+.email-verification-panel {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 14px;
+    color: #224b42;
+    background: #edf8f3;
+    border: 1px solid #cce8dd;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.email-steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.email-step {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 8px;
+    color: #58736c;
+    background: rgba(255, 255, 255, 0.58);
+    border: 1px solid rgba(23, 97, 79, 0.12);
+    border-radius: 8px;
+}
+
+.email-step span {
+    display: grid;
+    flex: 0 0 22px;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    color: #17614f;
+    background: #fff;
+    border-radius: 50%;
+    font-weight: 800;
+}
+
+.email-step strong {
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.email-step.active {
+    color: #224b42;
+    border-color: rgba(23, 97, 79, 0.24);
+}
+
+.email-copy {
+    display: grid;
+    gap: 4px;
+}
+
+.email-copy strong {
+    color: #173d33;
+    font-size: 14px;
+}
+
+.email-copy span,
+.email-dev-note {
+    color: #315c52;
+}
+
+.email-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.email-actions a,
+.email-actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid #cce8dd;
+    border-radius: 8px;
+    color: #17614f;
+    background: #fff;
+    font-weight: 800;
+    text-decoration: none;
+}
+
+.email-actions .email-primary {
+    color: #fff;
+    background: #17614f;
+    border-color: #17614f;
+}
+
+.email-dev-note {
+    padding-top: 2px;
+    font-size: 12px;
+    word-break: break-word;
+}
+
+.email-dev-note a {
+    color: #17614f;
+    font-weight: 800;
+}
+
 .auth-form {
     display: grid;
     gap: 12px;
@@ -600,6 +708,61 @@ body.sidebar-pinned .sidebar {
     color: var(--muted);
     font-size: 14px;
     font-weight: 700;
+}
+
+.artifact-picker {
+    display: grid;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.artifact-picker > span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+
+.artifact-options {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.artifact-option {
+    display: grid;
+    gap: 4px;
+    min-height: 64px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    background: #fff;
+    text-align: left;
+}
+
+.artifact-option strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.artifact-option span {
+    overflow: hidden;
+    display: -webkit-box;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.25;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.artifact-option.active {
+    color: #173d33;
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .quota-status {
@@ -1757,6 +1920,7 @@ body.sidebar-pinned .sidebar {
     .quick-actions,
     .home-deck-list,
     .template-grid,
+    .artifact-options,
     .delivery-shell,
     .workspace {
         grid-template-columns: 1fr;

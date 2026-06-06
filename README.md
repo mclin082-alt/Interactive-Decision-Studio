@@ -1,6 +1,6 @@
 # Slide Studio
 
-Slide Studio is a portfolio MVP for an AI-powered slide workspace. It turns a prompt and a visual template into a polished HTML slide deck, then lets users keep editing the deck through chat, annotations, undo, versions, fullscreen presentation, and export.
+Slide Studio is a portfolio MVP for an AI-powered presentation artifact workspace. It turns a prompt, artifact type, and visual template into a polished HTML-first presentation with interactive walkthroughs, data views, process diagrams, chat edits, annotations, undo, versions, fullscreen presentation, and export.
 
 ## Demo
 
@@ -13,7 +13,8 @@ The app seeds the demo account and two sample projects on startup unless `SEED_D
 
 ## What It Shows
 
-- Prompt-to-HTML slide generation using an OpenAI-compatible API
+- Prompt-to-HTML presentation artifact generation using an OpenAI-compatible API
+- Artifact type selection for product walkthroughs, startup pitches, AI project showcases, technical proposals, data stories, and sales narratives
 - Template selection and fixed 1920x1080 presentation output
 - Chat-based deck editing
 - Annotation-based targeted edits
@@ -49,6 +50,7 @@ Important variables:
 - `OPENAI_MODEL`: defaults to `gpt-4.1`
 - `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`: optional aliases if you do not want OpenAI-prefixed variable names
 - `APP_BASE_URL`: public app URL used to build email verification links
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`: optional SMTP settings for real verification emails. For Gmail, use `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, `SMTP_SECURE=true`, and a Gmail App Password as `SMTP_PASS`.
 - `GUEST_COOKIE_DAILY_LIMIT`, `GUEST_DEVICE_DAILY_LIMIT`, `GUEST_BROWSER_DAILY_LIMIT`, `GUEST_IP_DAILY_LIMIT`: guest trial guardrails, defaulting to 3/3/3/5
 - `SIGNUP_VERIFIED_CREDITS`: credits added after email verification, defaulting to 10
 - `FREE_DAILY_BUDGET_CENTS` and `GENERATION_COST_CENTS`: site-wide free usage budget guardrail, defaulting to 500 and 25

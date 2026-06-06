@@ -2,7 +2,7 @@
 
 ## One-Line Summary
 
-Slide Studio is an AI slide maker that turns prompts into polished HTML decks and keeps the full workflow around editing, versioning, presentation, and export.
+Slide Studio is an AI presentation artifact studio that turns complex prompts into polished HTML-first presentations with narrative structure, interaction, data views, walkthroughs, editing, versioning, presentation, and export.
 
 ## User Problem
 
@@ -14,13 +14,13 @@ People can already ask AI tools to draft slides, but the workflow often breaks a
 - Presentation and export are separate manual steps
 - Iteration history is easy to lose
 
-The target user for this MVP is a PM, founder, or job candidate who needs a presentation-ready deck quickly and wants to keep refining it.
+The target user for this MVP is a PM, founder, technical operator, or job candidate who needs a presentation-ready artifact for a complex idea and wants to keep refining it.
 
 ## Product Goal
 
 Build a credible end-to-end slide creation workspace:
 
-1. Generate from a prompt and template
+1. Generate from a prompt, artifact type, and template
 2. Preview the deck as real slides
 3. Edit via chat or annotations
 4. Save every project
@@ -33,7 +33,8 @@ Included:
 
 - Email/password login
 - Template library
-- Prompt-to-HTML generation
+- Prompt-to-HTML artifact generation
+- Artifact type selection
 - Chat edits
 - Annotation edits
 - Undo and versions
@@ -56,9 +57,9 @@ Deferred:
 
 ## Key Product Decisions
 
-### HTML Slides First
+### HTML Artifacts First
 
-HTML lets the product support high-fidelity layouts, animation, fullscreen presentation, and direct browser export. It also makes the generated artifact easy to inspect in a portfolio setting.
+HTML lets the product support high-fidelity layouts, animation, interaction, walkthroughs, data visualization, fullscreen presentation, and direct browser export. It also makes the generated artifact easy to inspect in a portfolio setting.
 
 ### Templates Before Blank Generation
 
