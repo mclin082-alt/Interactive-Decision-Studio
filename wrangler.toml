@@ -1,0 +1,38 @@
+name = "slide-studio"
+main = "src/worker.mjs"
+compatibility_date = "2026-06-01"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "slide-studio"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "DECKS"
+bucket_name = "slide-studio-decks"
+
+[vars]
+APP_BASE_URL = "https://your-domain.example"
+SEED_DEMO = "true"
+DEMO_EMAIL = "demo@slidestudio.local"
+DEMO_PASSWORD = "demo1234"
+OPENAI_PROVIDER = "OpenAI"
+OPENAI_MODEL = "gpt-4.1"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+GUEST_COOKIE_DAILY_LIMIT = "3"
+GUEST_DEVICE_DAILY_LIMIT = "3"
+GUEST_BROWSER_DAILY_LIMIT = "3"
+GUEST_IP_DAILY_LIMIT = "5"
+SIGNUP_VERIFIED_CREDITS = "10"
+UNVERIFIED_USER_DAILY_LIMIT = "0"
+FREE_DAILY_BUDGET_CENTS = "500"
+GENERATION_COST_CENTS = "25"
+GENERATION_MAX_TOKENS = "6500"
+EDIT_MAX_TOKENS = "9000"
+AI_REQUEST_TIMEOUT_MS = "120000"
+BASIC_TRIAL_TEMPLATE_IDS = "soft-editorial,blue-professional"

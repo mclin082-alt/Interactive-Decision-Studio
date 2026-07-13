@@ -84,7 +84,7 @@
                     <div class="brand-mark">S</div>
                     <div>
                         <div class="crumb">Slide Studio</div>
-                        <span>Presentation artifact studio</span>
+                        <span>Interactive presentation studio</span>
                     </div>
                 </div>
                 <div class="account-pill">
@@ -95,20 +95,20 @@
 
             <section class="home-hero">
                 <div class="hero-copy">
-                    <h1>What artifact should we build?</h1>
-                    <p>Turn a complex idea into an interactive HTML presentation with narrative, data, flow, and delivery built in.</p>
+                    <h1>What interactive presentation should we build?</h1>
+                    <p>Generate browser-native presentations with walkthroughs, calculators, dashboards, simulations, and clickable demo flows.</p>
                 </div>
 
                 <section class="composer" aria-label="Slide generation composer">
                     <div class="composer-input-row">
-                        <textarea id="promptInput" placeholder="Create a product walkthrough for an AI creation tool, with a workflow demo, benchmark chart, and founder pitch narrative"></textarea>
+                        <textarea id="promptInput" placeholder="Create a product launch presentation with a clickable product demo, benchmark dashboard, before/after slider, and rollout story"></textarea>
                         <button class="send-btn" id="generateBtn" type="button" title="Generate">↑</button>
                     </div>
-                    <div class="artifact-picker" aria-label="Artifact type">
+                    <div class="artifact-picker" aria-label="Artifact type" style="display:none">
                         <span>Artifact type</span>
                         <div class="artifact-options" id="artifactOptions"></div>
                     </div>
-                    <div class="composer-footer">
+                    <div class="composer-footer" style="display:none">
                         <div class="composer-tools">
                             <button class="icon-btn" type="button" title="Attach file">＋</button>
                             <button class="icon-btn" type="button" title="Workflow">⌘</button>
@@ -118,7 +118,7 @@
                             <button class="mode-chip" type="button">Frontend (HTML)</button>
                         </div>
                     </div>
-                    <div class="selected-template" id="selectedTemplate">
+                    <div class="selected-template" id="selectedTemplate" style="display:none">
                         <span>No template selected</span>
                     </div>
                     <div class="quota-status" id="quotaStatus"></div>
@@ -134,7 +134,7 @@
                 </section>
             </section>
 
-            <section class="templates-section">
+            <section class="templates-section" style="display:none">
                 <div class="section-head">
                     <div>
                         <h2>Templates</h2>
@@ -156,68 +156,40 @@
             </section>
         </section>
 
-        <section class="delivery-view hidden" id="deliveryView">
-            <header class="delivery-topline">
-                <button id="deliveryBackBtn" type="button">← Home</button>
-                <div>
-                    <strong>Slide Studio</strong>
-                    <span id="deliveryDeckName">Generating deck</span>
-                </div>
-            </header>
-
-            <section class="delivery-shell">
-                <section class="delivery-chat">
-                    <header class="delivery-task-head">
-                        <h1 id="deliveryPrompt">Create a presentation artifact.</h1>
-                        <span id="deliveryStatusPill">Generating</span>
-                    </header>
-
-                    <div class="working-card" id="workingCard">
-                        <div class="working-card-head">
-                            <span id="workingSummary">Working</span>
-                            <small id="workingElapsed">0s</small>
-                        </div>
-                        <div class="working-steps" id="workingSteps"></div>
-                    </div>
-
-                    <div class="delivery-message assistant hidden" id="deliveryResult">
-                        <strong>Delivery ready</strong>
-                        <span>Open the artifact to edit the deck, regenerate it, or export PDF.</span>
-                        <div class="delivery-actions">
-                            <button id="deliveryOpenDeckBtn" type="button">Open delivered deck</button>
-                            <button id="deliveryPdfBtn" type="button">Download PDF</button>
-                            <button id="deliveryHtmlBtn" type="button">Download HTML</button>
-                        </div>
-                    </div>
-
-                    <div class="delivery-message assistant failed hidden" id="deliveryFailure">
-                        <strong>Generation failed</strong>
-                        <span id="deliveryFailureText">Please retry in a moment.</span>
-                        <div class="delivery-actions">
-                            <button id="deliveryRetryBtn" type="button">Retry</button>
-                        </div>
-                    </div>
-                </section>
-            </section>
-        </section>
-
         <section class="workspace hidden" id="workspaceView">
             <aside class="chat-pane">
                 <div class="workspace-head">
+                    <button id="workspaceBackBtn" type="button" class="back-btn">← Home</button>
                     <div>
                         <strong id="deckTitle">Generated deck</strong>
                         <span id="deckMeta">HTML Artifact</span>
                     </div>
                 </div>
-                <div class="chat-log" id="chatLog"></div>
+                <div class="chat-scroll" id="chatScroll">
+                    <div class="task-card hidden" id="taskCard">
+                        <button class="task-card-head" id="taskCardHead" type="button" aria-expanded="true">
+                            <span class="task-status-pill" id="taskStatusPill">Generating</span>
+                            <span class="task-summary" id="taskSummary">Working…</span>
+                            <span class="task-toggle" id="taskToggleIcon">▾</span>
+                        </button>
+                        <p class="task-card-prompt" id="taskPrompt"></p>
+                        <div class="working-steps" id="workingSteps"></div>
+                        <div class="task-card-failure hidden" id="taskFailure">
+                            <span id="taskFailureText">Please retry in a moment.</span>
+                            <button id="taskRetryBtn" type="button">Retry</button>
+                        </div>
+                    </div>
+                    <div class="chat-log" id="chatLog"></div>
+                </div>
                 <form class="chat-form" id="chatForm">
                     <textarea id="chatInput" placeholder="Ask AI to edit the selected slide..."></textarea>
                     <div class="chat-actions">
                         <button id="editCurrentBtn" type="button">Edit current slide</button>
                         <button id="sendChatBtn" type="submit">Send</button>
                     </div>
-                </form>
-            </aside>
+                    </form>
+                    <button class="reopen-preview-btn hidden" id="reopenPreviewBtn" type="button" title="Show preview">预览 ▸</button>
+                </aside>
 
             <section class="preview-pane">
                 <header class="preview-toolbar">
@@ -229,26 +201,29 @@
                         <span class="page-pill" id="pageIndicator">Slide 1 / 1</span>
                         <button id="undoBtn" type="button">Undo</button>
                         <button id="regenerateBtn" type="button">Regenerate</button>
+                        <button id="shareBtn" type="button">Share</button>
                         <button id="exportBtn" type="button">Download HTML</button>
                         <button id="exportPdfBtn" type="button">Export PDF</button>
                         <button id="expandBtn" type="button">Expand</button>
                         <button class="preview-close-btn" id="closePreviewBtn" type="button" title="Close preview" aria-label="Close preview">×</button>
                     </div>
                 </header>
-                <div class="preview-stage" id="previewStage">
-                    <iframe id="slideFrame" title="Slide preview"></iframe>
-                    <div class="annotation-layer hidden" id="annotationLayer"></div>
-                    <div class="edit-overlay hidden" id="editOverlay">
-                        <span class="status-spinner"></span>
-                        <strong id="editOverlayTitle">Applying edit</strong>
+                <div class="preview-body" id="previewBody">
+                    <div class="preview-stage" id="previewStage">
+                        <iframe id="slideFrame" title="Slide preview"></iframe>
+                        <div class="annotation-layer hidden" id="annotationLayer"></div>
+                        <div class="edit-overlay hidden" id="editOverlay">
+                            <span class="status-spinner"></span>
+                            <strong id="editOverlayTitle">Applying edit</strong>
+                        </div>
+                        <aside class="annotation-panel hidden" id="annotationPanel">
+                            <header>
+                                <strong>Annotations</strong>
+                                <button id="closeAnnotationPanelBtn" type="button">×</button>
+                            </header>
+                            <div class="annotation-list" id="annotationList"></div>
+                        </aside>
                     </div>
-                    <aside class="annotation-panel hidden" id="annotationPanel">
-                        <header>
-                            <strong>Annotations</strong>
-                            <button id="closeAnnotationPanelBtn" type="button">×</button>
-                        </header>
-                        <div class="annotation-list" id="annotationList"></div>
-                    </aside>
                 </div>
             </section>
         </section>
@@ -256,6 +231,16 @@
 
     <div class="fullscreen hidden" id="fullscreenView">
         <button class="close-fullscreen" id="closeFullscreenBtn" type="button">×</button>
+        <aside class="fullscreen-rail hidden" id="fullscreenRail">
+            <div class="rail-tabs">
+                <button class="rail-tab active" id="railThumbTab" type="button" title="Thumbnails">▦</button>
+                <button class="rail-tab" id="railListTab" type="button" title="List">☰</button>
+            </div>
+            <div class="rail-items" id="railItems">
+                <div class="rail-empty">No slides yet.</div>
+            </div>
+            <button class="rail-close-btn" id="railCloseBtn" type="button" title="Close rail">×</button>
+        </aside>
         <iframe id="fullscreenFrame" title="Fullscreen slide preview"></iframe>
         <form class="fullscreen-chat" id="fullscreenChatForm">
             <button id="fullscreenPrevBtn" type="button" title="Previous slide">‹</button>
