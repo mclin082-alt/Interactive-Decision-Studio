@@ -6,7 +6,11 @@
     "start": "node server.js",
     "dev": "node server.js",
     "build": "vite build public --outDir ../dist --emptyOutDir",
-    "test": "node --check server.js && node --check public/app.js"
+    "cf:schema": "wrangler d1 execute slide-studio --file cloudflare/schema.sql --remote",
+    "cf:dev": "npm run build && wrangler dev",
+    "cf:deploy": "npm run build && wrangler deploy",
+    "cf:export-state": "node scripts/export-cloudflare-state.mjs",
+    "test": "node --check server.js && node --check public/app.js && node --check src/worker.mjs && node --check scripts/export-cloudflare-state.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",

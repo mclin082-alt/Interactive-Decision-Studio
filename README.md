@@ -49,6 +49,7 @@ Important variables:
 - `OPENAI_BASE_URL`: defaults to `https://api.openai.com/v1`
 - `OPENAI_MODEL`: defaults to `gpt-4.1`
 - `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`: optional aliases if you do not want OpenAI-prefixed variable names
+- `DEV_BYPASS_QUOTA`: set `true` only for local development to skip quota and email verification checks
 - `APP_BASE_URL`: public app URL used to build email verification links
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`: optional SMTP settings for real verification emails. For Gmail, use `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, `SMTP_SECURE=true`, and a Gmail App Password as `SMTP_PASS`.
 - `GUEST_COOKIE_DAILY_LIMIT`, `GUEST_DEVICE_DAILY_LIMIT`, `GUEST_BROWSER_DAILY_LIMIT`, `GUEST_IP_DAILY_LIMIT`: guest trial guardrails, defaulting to 3/3/3/5
@@ -58,6 +59,8 @@ Important variables:
 - `DEMO_EMAIL`: defaults to `demo@slidestudio.local`
 - `DEMO_PASSWORD`: defaults to `demo1234`
 - `CHROME_PATH`: Chrome/Chromium executable for PDF export
+
+For local debugging you can run `DEV_BYPASS_QUOTA=true npm run dev` to skip quota and email verification checks. Keep it unset or `false` in deployment environments.
 
 ## Architecture
 

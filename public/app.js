@@ -4,17 +4,17 @@ const state = {
   selectedTemplateId: null,
   activeDeck: null,
   recentDecks: [],
-  selectedArtifactTypeId: 'product-walkthrough',
+  selectedArtifactTypeId: 'product-launch',
   currentPage: 1,
   totalPages: 1,
   annotate: false,
   isGenerating: false,
   isEditing: false,
-  deliveryDeck: null,
   deliveryStartedAt: 0,
   deliveryPollTimer: null,
   deliveryElapsedTimer: null,
-  deliveryDownloadStarted: false,
+  taskCollapsed: false,
+  taskAutoCollapsed: false,
   pendingAnnotation: null,
   errors: [],
   quota: null,
@@ -26,14 +26,24 @@ const state = {
 
 const artifactTypes = [
   {
-    id: 'product-walkthrough',
-    name: 'Product walkthrough',
-    description: 'Demo states, user flow, value proof'
+    id: 'product-launch',
+    name: 'Product launch',
+    description: 'Demo flow, proof, rollout story'
   },
   {
-    id: 'startup-pitch',
-    name: 'Startup pitch',
-    description: 'Narrative, wedge, traction, roadmap'
+    id: 'fundraising-pitch',
+    name: 'Fundraising pitch',
+    description: 'Market, traction, model, ask'
+  },
+  {
+    id: 'sales-demo',
+    name: 'Sales demo',
+    description: 'Pain, ROI, proof, rollout'
+  },
+  {
+    id: 'strategy-review',
+    name: 'Strategy review',
+    description: 'Choices, tradeoffs, roadmap'
   },
   {
     id: 'ai-project-showcase',
@@ -41,9 +51,9 @@ const artifactTypes = [
     description: 'Workflow, architecture, evals, outcomes'
   },
   {
-    id: 'technical-proposal',
-    name: 'Technical proposal',
-    description: 'System flow, tradeoffs, rollout plan'
+    id: 'portfolio-case-study',
+    name: 'Portfolio case study',
+    description: 'Problem, process, outcome, demo'
   },
   {
     id: 'data-story',
@@ -58,6 +68,7 @@ const artifactTypes = [
 ];
 
 const $ = (selector) => document.querySelector(selector);
+let railMode = 'thumb';
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -158,7 +169,7 @@ async function api(path, options = {}) {
 }
 
 function show(view) {
-  ['authView', 'homeView', 'deliveryView', 'workspaceView'].forEach((id) => {
+  ['authView', 'homeView', 'workspaceView'].forEach((id) => {
     document.getElementById(id).classList.toggle('hidden', id !== view);
   });
 }
@@ -313,7 +324,7 @@ function renderDeckList() {
   lists.forEach((list) => {
     list.innerHTML = html;
     list.querySelectorAll('.deck-list-item').forEach((item) => {
-      item.addEventListener('click', () => openDeckById(item.dataset.deckId));
+      item.addEventListener('click', () => openThreadById(item.dataset.deckId));
     });
   });
 }
@@ -419,8 +430,8 @@ function setGenerateState(active) {
     $('#retryGenerateBtn').classList.add('hidden');
     $('#generationStatus').classList.remove('hidden');
     $('#generationStatus').classList.remove('failed');
-    $('#generationStatusTitle').textContent = 'Generating interactive HTML artifact';
-    $('#generationStatusDetail').textContent = 'Planning narrative, data, flow, walkthrough, and a browser-native presentation file.';
+    $('#generationStatusTitle').textContent = 'Designing interactive presentation';
+    $('#generationStatusDetail').textContent = 'Planning modules, composing narrative, and rendering a browser-native HTML experience.';
   } else if (!$('#generationStatus').classList.contains('failed')) {
     $('#generationStatus').classList.add('hidden');
   }
@@ -443,6 +454,8 @@ function parseProgressMessage(message) {
       title: parsed.title || message.text || 'Working',
       detail: parsed.detail || '',
       status: parsed.status || 'done',
+      type: parsed.type || 'step',
+      tool: parsed.tool || '',
       createdAt: message.createdAt
     };
   } catch (error) {
@@ -451,6 +464,8 @@ function parseProgressMessage(message) {
       title: message.text || 'Working',
       detail: '',
       status: 'done',
+      type: 'step',
+      tool: '',
       createdAt: message.createdAt
     };
   }
@@ -479,11 +494,13 @@ function renderWorkingSteps(deck) {
     const isLast = index === events.length - 1;
     const active = deck?.status === 'generating' && isLast && step.status !== 'failed';
     const failed = step.status === 'failed';
+    const typeLabel = step.type ? step.type.replace(/[-_]/g, ' ') : 'step';
     return `
       <div class="working-step ${active ? 'active' : 'done'} ${failed ? 'failed' : ''}">
         <div>
-          <strong>${step.title}</strong>
-          <span>${step.detail}</span>
+          <small class="run-event-type">${escapeHtml(typeLabel)}${step.tool ? ` · ${escapeHtml(step.tool)}` : ''}</small>
+          <strong>${escapeHtml(step.title)}</strong>
+          <span>${escapeHtml(step.detail)}</span>
         </div>
       </div>
     `;
@@ -495,8 +512,8 @@ function updateDeliveryElapsed() {
   const seconds = Math.max(0, Math.floor((Date.now() - state.deliveryStartedAt) / 1000));
   const minutes = Math.floor(seconds / 60);
   const label = minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
-  $('#workingElapsed').textContent = label;
-  $('#workingSummary').textContent = state.deliveryDeck?.status === 'complete' ? `Worked for ${label}` : `Working for ${label}`;
+  const summary = $('#taskSummary');
+  if (summary && state.activeDeck?.status === 'generating') summary.textContent = `Working for ${label}`;
 }
 
 function stopDeliveryTimers() {
@@ -506,53 +523,107 @@ function stopDeliveryTimers() {
   state.deliveryElapsedTimer = null;
 }
 
-function renderDelivery(deck) {
-  state.deliveryDeck = deck;
-  $('#deliveryPrompt').textContent = deck?.prompt || 'Create a presentation artifact.';
-  $('#deliveryDeckName').textContent = deck?.title || 'Generating deck';
-  $('#deliveryStatusPill').textContent = deck?.status === 'complete' ? 'Ready' : deck?.status === 'failed' ? 'Failed' : 'Generating';
-  $('#deliveryStatusPill').classList.toggle('failed', deck?.status === 'failed');
-  $('#deliveryStatusPill').classList.toggle('ready', deck?.status === 'complete');
-  $('#deliveryResult').classList.toggle('hidden', deck?.status !== 'complete');
-  $('#deliveryFailure').classList.toggle('hidden', deck?.status !== 'failed');
-  $('#deliveryFailureText').textContent = deck?.error || 'Please retry in a moment.';
+function toggleTaskCard(force) {
+  state.taskCollapsed = typeof force === 'boolean' ? force : !state.taskCollapsed;
+  $('#taskCard')?.classList.toggle('collapsed', state.taskCollapsed);
+  $('#taskCardHead')?.setAttribute('aria-expanded', String(!state.taskCollapsed));
+}
+
+function renderTaskCard(deck) {
+  const card = $('#taskCard');
+  if (!card || !deck) return;
+  card.classList.remove('hidden');
+  $('#taskPrompt').textContent = deck.prompt || 'Create a presentation artifact.';
   renderWorkingSteps(deck);
 
-  if (deck?.status === 'complete') {
-    stopDeliveryTimers();
-    loadDecks();
-    return;
-  }
+  const pill = $('#taskStatusPill');
+  const failed = deck.status === 'failed';
+  const complete = deck.status === 'complete';
+  pill.textContent = complete ? 'Ready' : failed ? 'Failed' : 'Generating';
+  pill.classList.toggle('failed', failed);
+  pill.classList.toggle('ready', complete);
 
-  if (deck?.status === 'failed') {
-    stopDeliveryTimers();
-    return;
+  const seconds = state.deliveryStartedAt ? Math.max(0, Math.floor((Date.now() - state.deliveryStartedAt) / 1000)) : 0;
+  const minutes = Math.floor(seconds / 60);
+  const label = minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  $('#taskSummary').textContent = complete ? `Generated in ${label}` : failed ? 'Generation failed' : `Working for ${label}`;
+
+  $('#taskFailure').classList.toggle('hidden', !failed);
+  $('#taskFailureText').textContent = deck.error || 'Please retry in a moment.';
+
+  // Auto-collapse the build steps the first time a deck finishes, without
+  // fighting a manual expand/collapse the person already did.
+  if (complete && !state.taskAutoCollapsed) {
+    state.taskAutoCollapsed = true;
+    toggleTaskCard(true);
   }
+  if (failed) toggleTaskCard(false);
 }
 
-async function pollDelivery(deckId) {
+async function pollThread(deckId) {
   try {
     const { deck } = await api(`/api/decks/${deckId}`);
-    renderDelivery(deck);
+    if (state.activeDeck?.id !== deckId) return;
+    state.activeDeck = deck;
+    renderTaskCard(deck);
+    if (deck.status === 'complete') {
+      stopDeliveryTimers();
+      $('#slideFrame').src = cacheBust(deck.deckPath, deck.updatedAt);
+      const template = state.templates.find((item) => item.id === deck.templateId);
+      $('#deckMeta').textContent = `${template?.name || 'Template'} · ${deck.shareUrl ? 'Private link ready' : 'HTML Artifact'}`;
+      $('#shareBtn').textContent = deck.shareUrl ? 'Copy link' : 'Share';
+      renderMessages(deck);
+      renderDeckList();
+      loadDecks();
+    } else if (deck.status === 'failed') {
+      stopDeliveryTimers();
+    }
   } catch (error) {
-    reportIssue(error.message || 'Could not refresh generation status.', 'Delivery', { deckId });
+    reportIssue(error.message || 'Could not refresh generation status.', 'Generation', { deckId });
   }
 }
 
-function openDelivery(deck, replace = false) {
-  state.deliveryStartedAt = Date.parse(deck.createdAt || '') || Date.now();
-  state.deliveryDownloadStarted = false;
-  renderDelivery(deck);
-  setRailActive('');
-  show('deliveryView');
-  const url = `#/deliver/${deck.id}`;
-  if (replace) history.replaceState({ deckId: deck.id }, '', url);
-  else history.pushState({ deckId: deck.id }, '', url);
-  stopDeliveryTimers();
-  state.deliveryElapsedTimer = setInterval(updateDeliveryElapsed, 1000);
-  state.deliveryPollTimer = setInterval(() => pollDelivery(deck.id), 2200);
-  updateDeliveryElapsed();
-  pollDelivery(deck.id);
+async function copyText(value) {
+  const text = String(value || '');
+  if (!text) return false;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  const ok = document.execCommand('copy');
+  input.remove();
+  return ok;
+}
+
+async function shareDeck(deck = state.activeDeck) {
+  if (!deck?.id) {
+    toast('Generate an artifact before sharing.');
+    return null;
+  }
+  try {
+    const existingUrl = deck.shareUrl;
+    const payload = existingUrl ? { deck, shareUrl: existingUrl } : await api(`/api/decks/${deck.id}/share`, { method: 'POST' });
+    const nextDeck = payload.deck || deck;
+    if (state.activeDeck?.id === nextDeck.id) {
+      state.activeDeck = nextDeck;
+      $('#shareBtn').textContent = 'Copy link';
+      const template = state.templates.find((item) => item.id === nextDeck.templateId);
+      $('#deckMeta').textContent = `${template?.name || 'Template'} · ${nextDeck.status || 'complete'} · Private link ready`;
+    }
+    await copyText(payload.shareUrl || nextDeck.shareUrl);
+    toast('Private link copied.');
+    return payload.shareUrl || nextDeck.shareUrl;
+  } catch (error) {
+    reportIssue(error.message || 'Could not create share link.', 'Share', { deckId: deck.id });
+    return null;
+  }
 }
 
 function addMessage(role, text) {
@@ -580,6 +651,7 @@ function setChatBusy(active) {
   $('#editCurrentBtn').disabled = active;
   $('#undoBtn').disabled = active;
   $('#regenerateBtn').disabled = active;
+  $('#shareBtn').disabled = active;
   $('#exportBtn').disabled = active;
   $('#exportPdfBtn').disabled = active;
   $('#chatInput').disabled = active;
@@ -624,6 +696,111 @@ function updatePageIndicator(page = state.currentPage, total = state.totalPages)
   if (fullscreenIndicator) fullscreenIndicator.textContent = `${state.currentPage} / ${state.totalPages}`;
 }
 
+let cachedDeckHtml = null;
+
+async function getDeckHtml(deckPath) {
+  if (cachedDeckHtml) return cachedDeckHtml;
+  if (!deckPath || deckPath === 'about:blank') return null;
+  try {
+    const response = await fetch(deckPath);
+    const html = await response.text();
+    cachedDeckHtml = html;
+    return html;
+  } catch (error) {
+    return null;
+  }
+}
+
+function invalidateDeckCache() {
+  cachedDeckHtml = null;
+}
+
+function extractSlideOutline(frame) {
+  if (!frame?.contentDocument) return [];
+  try {
+    const slides = [...frame.contentDocument.querySelectorAll('.slide')];
+    return slides.map((slide, index) => ({
+      index: index + 1,
+      title: slide.querySelector('h1, h2, h3')?.innerText?.trim().slice(0, 60) || `Slide ${index + 1}`
+    }));
+  } catch (error) {
+    return [];
+  }
+}
+
+function renderSlideRail(frame) {
+  const items = $('#railItems');
+  if (!items) return;
+  const outline = extractSlideOutline(frame);
+
+  if (!outline.length) {
+    items.innerHTML = '<div class="rail-empty">No slides yet.</div>';
+    return;
+  }
+
+  if (railMode === 'list') {
+    items.innerHTML = outline.map((slide) => `
+      <button class="rail-item rail-item-list ${slide.index === state.currentPage ? 'active' : ''}" data-page="${slide.index}">
+        <span class="rail-num">${slide.index}</span>
+        <span class="rail-title">${escapeHtml(slide.title)}</span>
+      </button>
+    `).join('');
+  } else {
+    items.innerHTML = outline.map((slide) => `
+      <button class="rail-item rail-item-thumb ${slide.index === state.currentPage ? 'active' : ''}" data-page="${slide.index}">
+        <span class="rail-thumb-box">
+          <span class="rail-thumb-num">${slide.index}</span>
+          <iframe class="rail-thumb-inner" srcdoc="" sandbox="allow-scripts" tabindex="-1" loading="lazy" data-page="${slide.index}"></iframe>
+        </span>
+        <span class="rail-title">${escapeHtml(slide.title)}</span>
+      </button>
+    `).join('');
+  }
+
+  // If thumb mode, load full deck HTML into each thumb iframe, then call __gotoSlide
+  if (railMode === 'thumb') {
+    const thumbIframes = items.querySelectorAll('.rail-thumb-inner');
+    const deckHtml = state.activeDeck?.deckPath ? getDeckHtml(state.activeDeck.deckPath) : null;
+    if (deckHtml) {
+      deckHtml.then((html) => {
+        if (!html) return;
+        thumbIframes.forEach((iframe) => {
+          const page = Number(iframe.dataset.page);
+          iframe.srcdoc = html;
+          iframe.addEventListener('load', function onLoad() {
+            iframe.removeEventListener('load', onLoad);
+            try {
+              if (iframe.contentWindow.__gotoSlide) {
+                iframe.contentWindow.__gotoSlide(page - 1);
+              }
+            } catch (e) {
+              // cross-origin or not ready
+            }
+          }, { once: true });
+        });
+      });
+    }
+  }
+
+  items.querySelectorAll('[data-page]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const page = Number(button.dataset.page);
+      // In fullscreen mode, jump the fullscreen frame; in preview mode, jump the slide frame
+      const targetFrame = $('#fullscreenView')?.classList.contains('hidden') ? $('#slideFrame') : $('#fullscreenFrame');
+      showFrameSlide(targetFrame, page);
+      renderSlideRail(targetFrame);
+    });
+  });
+}
+
+function setRailMode(mode) {
+  railMode = mode;
+  $('#railThumbTab').classList.toggle('active', mode === 'thumb');
+  $('#railListTab').classList.toggle('active', mode === 'list');
+  const targetFrame = $('#fullscreenView')?.classList.contains('hidden') ? $('#slideFrame') : $('#fullscreenFrame');
+  renderSlideRail(targetFrame);
+}
+
 async function generateDeck() {
   if (state.isGenerating) return;
   const userPrompt = $('#promptInput').value.trim();
@@ -636,15 +813,19 @@ async function generateDeck() {
     selectTemplate(state.templates[0].id);
   }
   setGenerateState(true);
-  toast('Opening the working page...');
   try {
     const { deck, user, quota } = await api('/api/generate', {
       method: 'POST',
-      body: { prompt: userPrompt, templateId: state.selectedTemplateId, artifactTypeId: state.selectedArtifactTypeId, async: true }
+      body: {
+        prompt: userPrompt,
+        templateId: state.selectedTemplateId,
+        artifactTypeId: state.selectedArtifactTypeId,
+        async: true
+      }
     });
     if (user) setUser(user);
     setQuota(quota);
-    openDelivery(deck);
+    openThread(deck);
     await loadDecks();
   } catch (error) {
     const failedDeck = error.data?.deck || null;
@@ -655,16 +836,14 @@ async function generateDeck() {
   }
 }
 
-async function retryGeneration(deckId, useDelivery = false) {
+async function retryGeneration(deckId) {
   if (!deckId || state.isGenerating) return;
   setGenerateState(true);
-  toast('Retrying generation...');
   try {
-    const { deck, quota } = await api(`/api/generate/${deckId}/retry`, { method: 'POST', body: { async: useDelivery } });
+    const { deck, quota } = await api(`/api/generate/${deckId}/retry`, { method: 'POST', body: { async: true } });
     setQuota(quota);
     $('#generationStatus').classList.add('hidden');
-    if (useDelivery) openDelivery(deck);
-    else openWorkspace(deck);
+    openThread(deck);
     await loadDecks();
   } catch (error) {
     const failedDeck = error.data?.deck || { id: deckId };
@@ -675,56 +854,64 @@ async function retryGeneration(deckId, useDelivery = false) {
   }
 }
 
-function openWorkspace(deck) {
+// A single canonical view for a deck: whether it's still generating, mid-edit,
+// or complete, it always renders the same chat + preview split at the same
+// URL (#/p/:id). Closing the preview, reopening the private link, or clicking
+// it from the sidebar all land here — nothing is view-specific anymore.
+function openThread(deck, replace = false) {
   stopDeliveryTimers();
   state.activeDeck = deck;
+  state.taskAutoCollapsed = deck.status !== 'generating';
+  state.taskCollapsed = deck.status !== 'generating';
+  invalidateDeckCache();
   $('#workspaceView').classList.remove('preview-closed');
   const template = state.templates.find((item) => item.id === deck.templateId);
-  $('#deckTitle').textContent = deck.title;
-  $('#deckMeta').textContent = `${template?.name || 'Template'} · ${deck.status || 'complete'} · HTML Artifact`;
-  $('#slideFrame').src = cacheBust(deck.deckPath, deck.updatedAt);
+  $('#deckTitle').textContent = deck.title || 'Generated deck';
+  $('#deckMeta').textContent = `${template?.name || 'Template'} · ${deck.status || 'complete'} · ${deck.shareUrl ? 'Private link ready' : 'HTML Artifact'}`;
+  $('#shareBtn').textContent = deck.shareUrl ? 'Copy link' : 'Share';
+  $('#slideFrame').src = deck.deckPath ? cacheBust(deck.deckPath, deck.updatedAt) : 'about:blank';
+  renderTaskCard(deck);
+  toggleTaskCard(state.taskCollapsed);
   renderMessages(deck);
   renderAnnotations(deck);
   renderDeckList();
   updatePageIndicator(deck.currentPage || 1, 1);
-  clientLog('info', 'Workspace opened', { deckId: deck.id, templateId: deck.templateId });
+  clientLog('info', 'Thread opened', { deckId: deck.id, templateId: deck.templateId, status: deck.status });
+  setRailActive('');
   show('workspaceView');
-  history.pushState({ deckId: deck.id }, '', `#/deck/${deck.id}`);
-}
+  const url = `#/p/${deck.id}`;
+  if (replace) history.replaceState({ deckId: deck.id }, '', url);
+  else history.pushState({ deckId: deck.id }, '', url);
 
-async function openDeckById(deckId) {
-  try {
-    const { deck } = await api(`/api/decks/${deckId}`);
-    openWorkspace(deck);
-  } catch (error) {
-    reportIssue(error.message || 'Could not open deck.', 'Deck history', { deckId });
+  if (deck.status === 'generating') {
+    state.deliveryStartedAt = Date.parse(deck.createdAt || '') || Date.now();
+    state.deliveryElapsedTimer = setInterval(updateDeliveryElapsed, 1000);
+    state.deliveryPollTimer = setInterval(() => pollThread(deck.id), 2200);
+    updateDeliveryElapsed();
+    pollThread(deck.id);
   }
 }
 
-async function openDeliveryById(deckId, replace = false) {
+async function openThreadById(deckId, replace = false) {
   try {
     const { deck } = await api(`/api/decks/${deckId}`);
-    openDelivery(deck, replace);
+    openThread(deck, replace);
   } catch (error) {
-    reportIssue(error.message || 'Could not open generation page.', 'Delivery', { deckId });
+    reportIssue(error.message || 'Could not open this link.', 'Thread', { deckId });
   }
 }
 
 function routeFromHash() {
-  const [, route, id] = window.location.hash.match(/^#\/([^/]+)\/([^/]+)/) || [];
-  return { route, id };
+  // #/p/:id is canonical. #/deck/:id and #/deliver/:id are accepted as
+  // aliases so old links/bookmarks from before the redesign still resolve.
+  const [, , id] = window.location.hash.match(/^#\/(p|deck|deliver)\/([^/]+)/) || [];
+  return { id };
 }
 
 async function restoreRoute() {
   if (!state.user) return;
-  const { route, id } = routeFromHash();
-  if (route === 'deliver' && id) {
-    await openDeliveryById(id, true);
-    return;
-  }
-  if (route === 'deck' && id) {
-    await openDeckById(id);
-  }
+  const { id } = routeFromHash();
+  if (id) await openThreadById(id, true);
 }
 
 function handleVerificationReturn() {
@@ -1229,38 +1416,33 @@ async function init() {
   $('#promptInput').addEventListener('input', () => {
     $('#generateBtn').classList.toggle('ready', Boolean($('#promptInput').value.trim()));
   });
-  $('#deliveryBackBtn').addEventListener('click', () => {
+  $('#workspaceBackBtn').addEventListener('click', () => {
     stopDeliveryTimers();
     setRailActive('home');
     show('homeView');
     history.pushState({}, '', '#/');
     loadDecks();
   });
-  $('#deliveryPdfBtn').addEventListener('click', () => {
-    if (!state.deliveryDeck) return;
-    openDownload(`/api/decks/${state.deliveryDeck.id}/export/pdf`);
-    toast('Preparing PDF export.');
-  });
-  $('#deliveryHtmlBtn').addEventListener('click', () => {
-    if (!state.deliveryDeck) return;
-    openDownload(`/api/decks/${state.deliveryDeck.id}/download/html`);
-  });
-  $('#deliveryOpenDeckBtn').addEventListener('click', () => {
-    if (state.deliveryDeck) openWorkspace(state.deliveryDeck);
-  });
-  $('#deliveryRetryBtn').addEventListener('click', () => {
-    if (state.deliveryDeck) retryGeneration(state.deliveryDeck.id, true);
+  $('#taskCardHead').addEventListener('click', () => toggleTaskCard());
+  $('#taskRetryBtn').addEventListener('click', () => {
+    if (state.activeDeck) retryGeneration(state.activeDeck.id);
   });
   $('#annotateBtn').addEventListener('click', () => {
     toggleAnnotate();
     renderAnnotations();
     toast(state.annotate ? 'Annotate mode on. Click the preview to add a note.' : 'Annotate mode off.');
   });
+  $('#railThumbTab').addEventListener('click', () => setRailMode('thumb'));
+  $('#railListTab').addEventListener('click', () => setRailMode('list'));
   $('#annotationLayer').addEventListener('click', addAnnotation);
   $('#slideFrame').addEventListener('load', () => {
     syncPreviewPage();
+    renderSlideRail($('#slideFrame'));
     clearInterval(syncPreviewPage.timer);
-    syncPreviewPage.timer = setInterval(syncPreviewPage, 800);
+    syncPreviewPage.timer = setInterval(() => {
+      syncPreviewPage();
+      renderSlideRail($('#slideFrame'));
+    }, 800);
   });
   $('#closePreviewBtn').addEventListener('click', () => {
     state.annotate = false;
@@ -1268,6 +1450,9 @@ async function init() {
     $('#annotateBtn').classList.remove('active');
     $('#annotationPanel').classList.add('hidden');
     $('#workspaceView').classList.add('preview-closed');
+  });
+  $('#reopenPreviewBtn').addEventListener('click', () => {
+    $('#workspaceView').classList.remove('preview-closed');
   });
   $('#fullscreenFrame').addEventListener('load', () => {
     showFrameSlide($('#fullscreenFrame'), state.currentPage);
@@ -1291,6 +1476,14 @@ async function init() {
   $('#editCurrentBtn').addEventListener('click', () => {
     $('#chatInput').value = `On slide ${state.currentPage}, `;
     $('#chatInput').focus();
+  });
+  $('#railCloseBtn').addEventListener('click', () => {
+    $('#fullscreenRail').classList.add('hidden');
+  });
+  document.addEventListener('keydown', (event) => {
+    if (!$('#fullscreenView')?.classList.contains('hidden') && event.key === 'r' && !activeElementIsTyping()) {
+      $('#fullscreenRail').classList.toggle('hidden');
+    }
   });
   $('#expandBtn').addEventListener('click', openFullscreenPresentation);
   $('#closeFullscreenBtn').addEventListener('click', closeFullscreenPresentation);
@@ -1327,6 +1520,10 @@ async function init() {
     }
     openDownload(`/api/decks/${state.activeDeck.id}/download/html`);
     toast('Downloading HTML deck.');
+  });
+
+  $('#shareBtn').addEventListener('click', () => {
+    shareDeck(state.activeDeck);
   });
 
   $('#exportPdfBtn').addEventListener('click', () => {
