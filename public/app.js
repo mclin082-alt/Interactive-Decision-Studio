@@ -1,8 +1,7 @@
 const state = {
   user: null,
   templates: [],
-  selectedTemplateId: null,
-  activeDeck: null,
+  selectedTemplateId: null,  activeDeck: null,
   recentDecks: [],
   selectedArtifactTypeId: 'product-walkthrough',
   currentPage: 1,
